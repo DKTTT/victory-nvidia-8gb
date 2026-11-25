@@ -912,9 +912,8 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         source
     };
     into_destination(request, size, |out| match tables {
-        Some(tables) => bcpack::decode(bc, &source, out, tables)
-            .map(|()| out.len())
-            .map_err(|e| fail(INVALID_DATA, &e.to_string())),
+        Some(tables) => bcpack_decode_cached(bc, &source, out, tables)
+            .map_err(|hr| fail(hr, "bcpack")),
         None => inflate(&source, out).map_err(|hr| fail(hr, "zlib")),
     })?;
     tracing::trace!(
@@ -924,6 +923,110 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         "dstorage: request done"
     );
     Ok(())
+}
+
+/// Unpacks a BCPack stream, from the decoded-chunk cache when the same
+/// stream was unpacked before.
+///
+/// The console's decompression block unpacks BCPack at gigabytes a second off
+/// the processor; the software decoder here runs at 20 to 41 MB/s (`cargo test
+/// --release -p victory-formats bcpack_throughput -- --ignored --nocapture`),
+/// and 69 to 85% of that is the entropy stage. A chunk once decoded is the
+/// same bytes every time the title asks for it (every launch, every revisit),
+/// so keeping the result costs disk and saves the whole decode.
+///
+/// Keyed by the format, the destination length and the packed bytes (blake3,
+/// first 32 hex digits). `VICTORY_BCPACK_CACHE=0` turns it off;
+/// `VICTORY_BCPACK_CACHE_DIR` names the folder (default: `bcpack` under the
+/// cache directory). Writes are atomic (temporary file, then rename), and a
+/// failed write is only a lost optimisation.
+fn bcpack_decode_cached(
+    bc: u8,
+    source: &[u8],
+    out: &mut [u8],
+    tables: &Tables,
+) -> Result<usize, HRESULT> {
+    static ON: OnceLock<bool> = OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_BCPACK_CACHE").is_none_or(|v| v != "0"));
+    let dir = if on { bcpack_cache_dir() } else { None };
+    let Some(dir) = dir else {
+        return decode_bcpack(bc, source, out, tables);
+    };
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[bc]);
+    hasher.update(&(out.len() as u64).to_le_bytes());
+    hasher.update(source);
+    let hex = hasher.finalize().to_hex();
+    let path = dir.join(format!("{}.bc{bc}", &hex[..32]));
+    if let Ok(bytes) = std::fs::read(&path)
+        && bytes.len() == out.len()
+    {
+        out.copy_from_slice(&bytes);
+        return Ok(out.len());
+    }
+    decode_bcpack(bc, source, out, tables)?;
+    write_bcpack_cache(&dir, &path, out);
+    Ok(out.len())
+}
+
+/// The folder decoded BCPack chunks live in, made on first use.
+fn bcpack_cache_dir() -> Option<std::path::PathBuf> {
+    let dir = match std::env::var_os("VICTORY_BCPACK_CACHE_DIR") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let base = match std::env::var_os("VICTORY_CACHE_DIR") {
+                Some(p) => std::path::PathBuf::from(p),
+                None => std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+                    .join("victory")
+                    .join("cache"),
+            };
+            base.join("bcpack")
+        }
+    };
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "bcpack: no cache folder");
+            None
+        }
+    }
+}
+
+/// Writes a decoded chunk to `path` through a temporary file, so a reader
+/// never sees half of it; two workers decoding the same stream race harmlessly
+/// (the second rename may fail, and the bytes are the same).
+fn write_bcpack_cache(dir: &std::path::Path, path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write as _;
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, Ordering::Relaxed);
+    let temp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
+    let written = std::fs::File::create(&temp).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return;
+    }
+    if std::fs::rename(&temp, path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
+/// The decoder itself, for a chunk the cache does not hold.
+fn decode_bcpack(
+    bc: u8,
+    source: &[u8],
+    out: &mut [u8],
+    tables: &Tables,
+) -> Result<usize, HRESULT> {
+    match bcpack::decode(bc, source, out, tables) {
+        Ok(()) => Ok(out.len()),
+        Err(e) => {
+            tracing::warn!(bc, error = %e, "dstorage: BCPack stream does not decode");
+            Err(INVALID_DATA)
+        }
+    }
 }
 
 /// Inflates a zlib stream into `out`, returning the bytes written. A stream

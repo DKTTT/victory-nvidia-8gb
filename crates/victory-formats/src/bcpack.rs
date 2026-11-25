@@ -86,6 +86,10 @@ pub struct Tables {
     /// Per model, the bucket of the first slot of each 256-slot window: the
     /// search for a slot's bucket starts there and seldom moves on.
     bucket: Box<[[u8; 256]; MODELS]>,
+    /// Per model, the bucket of every slot, flattened: the decode loop reads
+    /// one byte instead of a window and a walk (8 MB, built once with the
+    /// tables). `slot_bucket[model << 16 | slot]`.
+    slot_bucket: Box<[u8]>,
     /// ceil(2^32 / freq): exact division for the offsets inside a bucket.
     recip: [[u64; BUCKETS]; MODELS],
     rank1: [u8; 256],
@@ -164,6 +168,19 @@ impl Tables {
                 *b = start[m][1..].iter().filter(|&&s| s <= first).count() as u8;
             }
         }
+        let bucket = bucket;
+        // The flattened table the decode loop reads: one pass per model.
+        let mut slot_bucket = vec![0u8; MODELS << 16].into_boxed_slice();
+        for m in 0..MODELS {
+            let base = m << 16;
+            let mut b = 0usize;
+            for slot in 0..1u32 << 16 {
+                while start[m][b + 1] <= slot {
+                    b += 1;
+                }
+                slot_bucket[base | slot as usize] = b as u8;
+            }
+        }
         let rank1 = r.bytes();
         let rank3a = r.bytes();
         let rank3c = r.bytes();
@@ -235,6 +252,7 @@ impl Tables {
             freq,
             start,
             bucket,
+            slot_bucket,
             recip,
             rank1,
             rank3a,
@@ -312,6 +330,7 @@ struct Lane {
 impl Lane {
     /// One step: take the latched byte (header, length or payload) and
     /// decode at most one symbol.
+    #[inline(always)]
     fn step(&mut self, t: &Tables) -> Result<(), Error> {
         if self.phase != 3 {
             let Some(b) = self.latch.take() else {
@@ -387,16 +406,10 @@ impl Lane {
 }
 
 /// The bucket holding `slot` (below 65536): the last whose start is at or
-/// below it. The window table gives the bucket of the window's first slot;
-/// later buckets that start inside the window are stepped over.
-#[inline]
+/// below it, read from the flattened table.
+#[inline(always)]
 fn bucket_of(t: &Tables, model: u8, slot: u32) -> usize {
-    let start = &t.start[usize::from(model)];
-    let mut b = usize::from(t.bucket[usize::from(model)][(slot >> 8) as usize]);
-    while start[b + 1] <= slot {
-        b += 1;
-    }
-    b
+    usize::from(t.slot_bucket[(usize::from(model) << 16) | slot as usize])
 }
 
 /// Decodes `per` symbols per block on every lane into `records` (one record
@@ -1563,6 +1576,56 @@ mod tests {
                 "BC{bc}: {blocks} blocks, {:.1} MB out/s, {:.1} ns/block",
                 (blocks * block) as f64 / secs / 1e6,
                 secs * 1e9 / blocks as f64
+            );
+        }
+    }
+
+    /// Where the decode time goes: entropy stage (`lanes`) against block
+    /// reconstruction, on the same synthetic streams as `bcpack_throughput`:
+    /// `cargo test --release -p victory-formats bcpack_phase_split -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bcpack_phase_split() {
+        let t = Tables::parse(&tables()).unwrap();
+        let cases: [(u8, &[u8], usize, usize); 3] = [
+            (1, &[7, 7, 4, 5, 4, 4, 5, 4, 7, 7, 7, 7], 1, 8),
+            (4, &BC4_LANES, 1, 8),
+            (7, &[3, 3, 7, 7, 7, 7, 7, 6, 6, 4, 5, 7, 7, 7, 7, 4], 2, 16),
+        ];
+        for (bc, widths, per, block) in cases {
+            let blocks = 1 << 14;
+            let records_src = random_records(widths, per, blocks, bc == 7);
+            let src = stream(&t, widths, per, &records_src);
+            let stride = widths.len() * per;
+            let mut dst = vec![0u8; blocks * block];
+            let runs = 20;
+            let mut lanes_secs = 0.0;
+            let mut recon_secs = 0.0;
+            for _ in 0..runs {
+                let mut records = vec![0u8; blocks * stride];
+                let started = std::time::Instant::now();
+                let mut next = src.iter().copied();
+                lanes(&t, widths, per, blocks, |_| next.next(), &mut records).unwrap();
+                lanes_secs += started.elapsed().as_secs_f64();
+
+                let started = std::time::Instant::now();
+                let r = records.chunks_exact(stride);
+                let o = dst.chunks_exact_mut(block);
+                match bc {
+                    1 => super::plain(r, o, &t.bc1, &super::BC1, |s| super::bc1_residual(&t, s), super::bc1_pack),
+                    4 => super::plain(r, o, &t.bc4, &super::BC4, |s| super::bc4_residual(&t, s), super::bc4_pack),
+                    _ => super::bc7(r, o, &t),
+                }
+                .unwrap();
+                recon_secs += started.elapsed().as_secs_f64();
+            }
+            let lanes_ms = lanes_secs / f64::from(runs) * 1e3;
+            let recon_ms = recon_secs / f64::from(runs) * 1e3;
+            let total = lanes_ms + recon_ms;
+            println!(
+                "BC{bc}: lanes {lanes_ms:.1} ms ({:.0}%), reconstruction {recon_ms:.1} ms ({:.0}%), total {total:.1} ms",
+                lanes_ms / total * 100.0,
+                recon_ms / total * 100.0
             );
         }
     }
