@@ -94,11 +94,64 @@ pub fn warm(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
+    if let Some(s) = stand_in(container) {
+        return Ok(s);
+    }
     let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
     match CACHE.get() {
         Some(cache) => cached(cache, &build(), container, translate),
         None => translate(container),
     }
+}
+
+/// Optional stand-ins from `victory_shader::emit::stand_in`:
+/// - `VICTORY_AMBIENT_STUB=1`: replaces the diffuse GI temporal resolve passes
+///   with a constant ambient light floor (`VICTORY_AMBIENT_STUB_VALUE`, 0.1).
+/// - `VICTORY_SHADOWMASK_STUB=1`: replaces the ray-traced distant shadow passes
+///   with 1 (lit) (`VICTORY_SHADOWMASK_STUB_VALUE`, 1).
+fn stand_in(container: &[u8]) -> Option<HostShader> {
+    use victory_shader::emit::stand_in as s;
+    let hash = blake3::hash(container).to_hex()[..16].to_owned();
+    let kinds = [
+        ("VICTORY_AMBIENT_STUB", s::AMBIENT_HASHES, s::AMBIENT_VALUE, s::ambient_slots(&hash)),
+        ("VICTORY_SHADOWMASK_STUB", s::SHADOWMASK_HASHES, s::SHADOWMASK_VALUE, s::SHADOWMASK_SLOTS),
+    ];
+    for (name, hashes, value, defaults) in kinds {
+        if std::env::var(name).ok().as_deref().map(str::trim) != Some("1") {
+            continue;
+        }
+        let listed = match std::env::var(format!("{name}_HASHES")) {
+            Ok(v) => v
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .any(|h| h.eq_ignore_ascii_case(&hash)),
+            Err(_) => hashes.contains(&hash.as_str()),
+        };
+        if !listed {
+            continue;
+        }
+        let value = std::env::var(format!("{name}_VALUE"))
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(value);
+        let slots = std::env::var(format!("{name}_SLOTS")).unwrap_or_default();
+        let plan = s::Plan::new(value).with_overrides(defaults).with_overrides(&slots);
+        match s::storing_plan(container, plan) {
+            Ok((shader, plan)) => {
+                tracing::warn!(
+                    %hash,
+                    stand_in = name,
+                    value,
+                    outputs = ?plan.seen,
+                    "pass replaced by a stand-in writing each output in its own encoding"
+                );
+                return Some(shader);
+            }
+            Err(e) => {
+                tracing::warn!(%hash, stand_in = name, error = %e, "stand-in does not translate");
+            }
+        }
+    }
+    None
 }
 
 /// The cache entry's converter: the build and the container in, the
