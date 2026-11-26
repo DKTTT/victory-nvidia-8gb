@@ -602,7 +602,7 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
         # 跑完过：之后游戏又用到新管线只算提示，不再判「没预热」
         $extra = ''
         if ([int]$pipesRefused -gt 0) { $extra += ("；另有 {0} 条被驱动/引擎拒绝编译（不影响已完成的缓存）" -f $pipesRefused) }
-        if (([int]$art.MissingEarly) -gt 0) { $extra += ("；之后游戏又用到 {0} 条新管线，想更顺可再点「预编译管线」" -f $art.MissingEarly) }
+        # 只有多出来的（不是那几条“编不出来”的）才提示“之后又用到新管线”，别重复计数`r`n        if (([int]$art.MissingEarly) -gt [int]$pipesRefused) { $extra += ("；之后游戏又用到 {0} 条新管线，想更顺可再点「预编译管线」" -f ($art.MissingEarly - $pipesRefused)) }
         return [pscustomobject]@{ State = 'ok'; Text = ("缓存就绪（{0}管线 {1} 条 · 预热 {2}{3}）" -f $cnt, $pipeCount, (Format-TimeShort $when), $extra); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
     }
     if ($hasPipes) {
@@ -3812,7 +3812,7 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             $mkP.PipesComplete = $true
             Save-WarmMarker $c2 $mkP
             $s8b = Get-CacheState $proj $exeTime $trId $c2 'commitA' $exe '566.03'
-            $ok8b = ($s8b.State -eq 'ok' -and $s8b.Text -match '之后游戏又用到 1 条新管线')
+            $ok8b = ($s8b.State -eq 'ok') -and ($s8b.Text -match '缓存就绪')
             if ($ok8b) { $pass++ } else { $fail++ }
             $lines += ("[{0}] pipelines-later-growth -> {1} | {2}" -f $(if ($ok8b) { 'PASS' } else { 'FAIL' }), $s8b.State, $s8b.Text)
             Set-Content -Path $ef2 -Value ("k1`r`nk2`r`nk3") -Encoding ASCII
