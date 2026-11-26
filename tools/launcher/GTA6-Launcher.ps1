@@ -968,6 +968,7 @@ $script:warmPre = $null
 $script:autoStage = 0
 $script:pipeRounds = 0
 $script:pipeMissing = -1
+$script:warmUseJobs = $true
 $script:bgProc = $null
 $script:bgJob = $null
 $script:rootFallbackWarned = $false
@@ -1516,7 +1517,10 @@ function Start-Warm([string]$kind, [switch]$Auto) {
             if ($script:hw) { $vramGB = [math]::Round($script:hw.VramMB / 1024, 0) }
             if ($vramGB -le 8) { $warmJobs = 4 } elseif ($vramGB -le 12) { $warmJobs = 6 } else { $warmJobs = 8 }
         }
-        $procArgs = if ($kind -eq 'pipelines') { @('warm', '--used', '--jobs', "$warmJobs") } else { @('shaders', $rpf) }
+        $procArgs = if ($kind -eq 'pipelines') {
+            if ($script:warmUseJobs -eq $false) { @('warm', '--used') }
+            else { @('warm', '--used', '--jobs', "$warmJobs") }
+        } else { @('shaders', $rpf) }
         $script:warmTotal = if ($kind -eq 'pipelines') { 2400 } else { 26000 }
         # 预热过程中用户可能切构建：把这次预热对应的构建/版本固定下来
         $bb = $script:builds[$lstBuilds.SelectedIndex]
@@ -1965,6 +1969,13 @@ function Update-Warm {
             if ($progressed -and ([int]$script:pipeRounds -lt 8)) {
                 Add-Log ("管线预热没跑完（还差 {0} 条），引擎提前收尾 → 自动继续第 {1} 轮（已跑 {2} 轮）" -f $nowMissing, ([int]$script:pipeRounds + 1), [int]$script:pipeRounds)
                 $progress.Value = 0
+                Start-Warm 'pipelines' -Auto
+                return
+            }
+            # 这一轮一点没动、但整体还差很多：可能是这个构建的 warm 不认 --jobs（老版本）→ 去掉再试一次
+            if (-not $progressed -and $script:warmUseJobs -and [int]$script:pipeRounds -le 1) {
+                $script:warmUseJobs = $false
+                Add-Log '这个构建的 warm 可能不认识 --jobs 参数：去掉并发参数再试一次'
                 Start-Warm 'pipelines' -Auto
                 return
             }
