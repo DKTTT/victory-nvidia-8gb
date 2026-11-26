@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.4
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.5
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -17,12 +17,34 @@ $ProgressPreference = 'SilentlyContinue'   # 下载时不弹蓝色进度条
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $Root 'launcher-config.json'
 
+# 纯字符串拼路径：不碰文件系统，盘符不存在也不会报错（Join-Path 会抛 DriveNotFoundException）
+function Combine-Path([string]$base, [string]$leaf) {
+    try {
+        if (-not $base) { $base = $Root }
+        return [System.IO.Path]::Combine($base, $leaf)
+    } catch {
+        return [System.IO.Path]::Combine($Root, $leaf)
+    }
+}
+
+# 配置里的盘还在不在（U 盘/移动盘/换机器时 D: 以外的盘可能不存在）
+function Test-RootUsable([string]$path) {
+    if (-not $path) { return $false }
+    try {
+        $full = [System.IO.Path]::GetFullPath($path)
+        $root = [System.IO.Path]::GetPathRoot($full)
+        if (-not $root) { return $false }
+        return (Test-Path $root)
+    } catch { return $false }
+}
+
 # ---------------------------------------------------------------- 配置
+# 注意：这里不放任何“作者机器上的路径”。留空 = 启动时自己扫描/就近创建。
 $DefaultCfg = @{
-    GameDir   = 'E:\GTA6.Xbox.v1.0.2.1-CYBERLEEK'
-    BuildRoot = 'E:\gta6\work'
-    CacheRoot = 'E:\gta6'
-    SaveRoot  = 'E:\gta6\work'
+    GameDir   = ''
+    BuildRoot = ''
+    CacheRoot = ''
+    SaveRoot  = ''
     Repo      = 'DKTTT/victory-nvidia-8gb'
     Branch    = 'tools-and-patches'
     Console   = 'auto'
@@ -59,6 +81,126 @@ function Save-Cfg {
         $Cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigPath -Encoding UTF8
     } catch { }
 }
+
+# ---------------------------------------------------------------- 路径自动检测（不依赖任何作者机器上的路径）
+function Test-DirHasGame([string]$d) {
+    if (-not $d) { return $false }
+    try { return (Test-Path (Combine-Path $d 'game_scarlett_master.exe')) } catch { return $false }
+}
+
+# 列出「值得一看」的目录：各盘根、盘根下名字像游戏的目录（最多两层），数量有上限
+function Get-DriveCandidates {
+    $out = @()
+    foreach ($drv in @(Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue)) {
+        if (-not $drv.Root) { continue }
+        if ($drv.Root -like '*:\*' -and -not (Test-Path $drv.Root)) { continue }
+        $out += $drv.Root
+        $tops = @()
+        try { $tops = @(Get-ChildItem $drv.Root -Directory -EA SilentlyContinue) } catch { }
+        $named = @($tops | Where-Object { $_.Name -match '(?i)gta|game|victory|console|steam|epic' })
+        $others = @($tops | Where-Object { $_.Name -notmatch '(?i)gta|game|victory|console|steam|epic' } | Select-Object -First 40)
+        foreach ($t in @($named + $others)) {
+            $out += $t.FullName
+            $subs = @()
+            try { $subs = @(Get-ChildItem $t.FullName -Directory -EA SilentlyContinue | Select-Object -First 40) } catch { }
+            foreach ($s in @($subs | Where-Object { $_.Name -match '(?i)gta|game|victory' })) { $out += $s.FullName }
+        }
+    }
+    return @($out | Select-Object -Unique)
+}
+
+# 找游戏目录：含 game_scarlett_master.exe（shaders.rpf 同目录）
+function Find-GameDir {
+    foreach ($c in (Get-DriveCandidates)) {
+        if (Test-DirHasGame $c) { return $c }
+    }
+    # 再深一层（比如 X:\Games\GTA6\xxx）
+    foreach ($c in (Get-DriveCandidates)) {
+        $subs = @()
+        try { $subs = @(Get-ChildItem $c -Directory -EA SilentlyContinue | Select-Object -First 40) } catch { }
+        foreach ($s in $subs) { if (Test-DirHasGame $s.FullName) { return $s.FullName } }
+    }
+    return ''
+}
+
+# 找构建根目录：含 */target/diag|release/victory.exe 的目录（只在这些候选里找，不整盘递归）
+function Find-BuildRoot {
+    $cands = @(Combine-Path $Root 'work', Combine-Path $Root 'gta6')
+    foreach ($c in (Get-DriveCandidates)) {
+        $cands += (Combine-Path $c 'work')
+        $cands += (Combine-Path $c 'gta6')
+        $cands += (Combine-Path $c 'downloaded')
+    }
+    foreach ($c in @($cands | Select-Object -Unique)) {
+        if (-not (Test-Path $c)) { continue }
+        try {
+            $hit = @(Get-ChildItem $c -Recurse -Depth 4 -Filter 'victory.exe' -File -EA SilentlyContinue |
+                Where-Object { $_.FullName -match '\\target\\(diag|release)\\victory\.exe$' } | Select-Object -First 1)
+            if ($hit.Count -gt 0) { return $c }
+        } catch { }
+    }
+    return ''
+}
+
+# 就近可写目录（启动器目录优先，写不进去就用 LocalAppData）
+function Get-PortableRoot {
+    $try = @((Combine-Path $Root 'gta6'), (Combine-Path $env:LOCALAPPDATA 'GTA6Launcher'))
+    foreach ($p in $try) {
+        try {
+            New-Item -ItemType Directory -Force -Path $p -EA Stop | Out-Null
+            $probe = Combine-Path $p ('.write-test-' + [guid]::NewGuid().ToString('N').Substring(0, 4))
+            Set-Content -Path $probe -Value 'x' -EA Stop
+            Remove-Item $probe -Force -EA SilentlyContinue
+            return $p
+        } catch { }
+    }
+    return (Combine-Path $env:TEMP 'gta6')
+}
+
+# 启动时把空/失效的路径补上（配置里留空或盘不存在都会走这里）
+function Initialize-Paths {
+    $det = @()
+    if (-not (Test-DirHasGame $Cfg.GameDir)) {
+        $found = Find-GameDir
+        if ($found) {
+            if ($Cfg.GameDir) { $det += ("游戏目录改用它: {0}（原 {1} 不对）" -f $found, $Cfg.GameDir) } else { $det += ("自动找到游戏目录: {0}" -f $found) }
+            $Cfg.GameDir = $found
+        } elseif ($Cfg.GameDir) {
+            $det += ("游戏目录 {0} 里没有 game_scarlett_master.exe，请手动选" -f $Cfg.GameDir)
+        } else {
+            $det += '没自动找到游戏目录，请在①页手动选（含 game_scarlett_master.exe 的那层）'
+        }
+    }
+    if (-not $Cfg.BuildRoot -or -not (Test-Path $Cfg.BuildRoot)) {
+        $found = Find-BuildRoot
+        if ($found) {
+            if ($Cfg.BuildRoot) { $det += ("构建根目录改用它: {0}（原 {1} 不存在）" -f $found, $Cfg.BuildRoot) } else { $det += ("自动找到构建根目录: {0}" -f $found) }
+            $Cfg.BuildRoot = $found
+        } elseif ($Cfg.BuildRoot) {
+            $det += ("构建根目录 {0} 不存在，请手动选" -f $Cfg.BuildRoot)
+            $Cfg.BuildRoot = ''
+        } else {
+            $det += '没自动找到本地构建，可在①页选构建根目录，或用②页下载/编译'
+        }
+    }
+    $portable = ''
+    if (-not $Cfg.CacheRoot -or -not (Test-RootUsable $Cfg.CacheRoot)) {
+        if (-not $portable) { $portable = Get-PortableRoot }
+        $det += ("缓存根目录: {0}（放在启动器旁边，可改）" -f $portable)
+        $Cfg.CacheRoot = $portable
+    }
+    if (-not $Cfg.SaveRoot -or -not (Test-RootUsable $Cfg.SaveRoot)) {
+        if (-not $portable) { $portable = Get-PortableRoot }
+        $save = Combine-Path $portable 'work'
+        New-Item -ItemType Directory -Force -Path $save -EA SilentlyContinue | Out-Null
+        $det += ("存档根目录: {0}（放在启动器旁边，可改）" -f $save)
+        $Cfg.SaveRoot = $save
+    }
+    return $det
+}
+# 路径补全（空 = 自己扫描；失效 = 重新扫描。不写死任何作者机器上的路径）
+$script:pathNotes = @()
+try { $script:pathNotes = @(Initialize-Paths) } catch { $script:pathNotes = @('路径自动检测出错: ' + $_.Exception.Message) }
 
 # ---------------------------------------------------------------- 构建元数据 / 版本检测 / 预热记录
 # v1.9.1 起，缓存是否可用不再看 exe 修改时间（重新编译后必然误判“过期”），而看三样东西：
@@ -234,7 +376,7 @@ function New-WarmRecord {
         Project = ''; Exe = ''; Commit = ''; Translator = ''; Driver = ''; BuildTime = ''
         ShadersDone = $false; ShadersComplete = $false; ShadersTime = ''; ShadersCount = 0
         ShadersUnsupported = $false; PipesUnsupported = $false;
-        PipesDone = $false; PipesComplete = $false; PipesTime = ''; PipesFingerprint = ''; PipesLines = 0
+        PipesDone = $false; PipesComplete = $false; PipesTime = ''; PipesFingerprint = ''; PipesLines = 0; PipesRefused = 0
     }
 }
 
@@ -255,7 +397,7 @@ function Get-WarmMarker([string]$cacheDir) {
         $o.PipesComplete = [bool]$raw.pipesComplete
         $o.ShadersUnsupported = [bool]$raw.shadersUnsupported
         $o.PipesUnsupported = [bool]$raw.pipesUnsupported
-        $o.PipesFingerprint = [string]$raw.pipesFingerprint; $o.PipesLines = [int]$raw.pipesLines
+        $o.PipesFingerprint = [string]$raw.pipesFingerprint; $o.PipesLines = [int]$raw.pipesLines; $o.PipesRefused = [int]$raw.pipesRefused
         return $o
     } catch { return $null }
 }
@@ -283,6 +425,7 @@ function Save-WarmMarker([string]$cacheDir, $o) {
             pipesTime      = $o.PipesTime
             pipesFingerprint = $o.PipesFingerprint
             pipesLines     = [int]$o.PipesLines
+            pipesRefused   = [int]$o.PipesRefused
             updated        = (Get-Date).ToString('o')
         }
         ($obj | ConvertTo-Json -Depth 4) | Set-Content -Path (Join-Path $cacheDir $script:markerName) -Encoding UTF8
@@ -363,7 +506,7 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
     $src = 'file'
     $recTr = ''; $recCommit = ''; $recDriver = ''
     $shTime = $null; $shCount = 0; $pipeTime = $null
-    $shComplete = $true; $pipesComplete = $true
+    $shComplete = $true; $pipesComplete = $true; $pipesRefused = 0
     if ($mk) {
         $src = 'record'
         $recTr = [string]$mk.Translator; $recCommit = [string]$mk.Commit; $recDriver = [string]$mk.Driver
@@ -371,6 +514,7 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
         if ($mk.PipesDone) { $pipeTime = ConvertTo-TimeOrNull $mk.PipesTime }
         $shComplete = [bool]$mk.ShadersComplete
         $pipesComplete = [bool]$mk.PipesComplete
+        $pipesRefused = [int]$mk.PipesRefused
     } elseif ($me) {
         $src = 'meta'
         try { $recTr = [string]$me.translator } catch { }
@@ -439,7 +583,8 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
     if (-not $when) { $when = $shTime }
     if (-not $when) { $when = $art.PipesTime }
     if ($hasShaders -and $hasPipes) {
-        if (([int]$art.MissingEarly) -gt 0) {
+        # 只有「没记成完成」时，差集才算“没跑完”；跑完过（含剩下被驱动拒绝的）只作提示
+        if (([int]$art.MissingEarly) -gt 0 -and -not $pipesComplete) {
             return [pscustomobject]@{ State = 'partial'; Text = ("管线预热未完成：还差 {0} 条（可点「预编译管线」续传）· 着色器已就绪" -f $art.MissingEarly); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
         }
         $cnt = if ($shCount -gt 0) { "着色器 {0} 个 · " -f $shCount } elseif (([int]$art.ShaderFiles) -gt 0) { "着色器 {0} 个 · " -f $art.ShaderFiles } else { '着色器已就绪 · ' }
@@ -456,7 +601,8 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
         }
         # 跑完过：之后游戏又用到新管线只算提示，不再判「没预热」
         $extra = ''
-        if (([int]$art.MissingEarly) -gt 0) { $extra = ("；之后游戏又用到 {0} 条新管线，想更顺可再点「预编译管线」" -f $art.MissingEarly) }
+        if ([int]$pipesRefused -gt 0) { $extra += ("；另有 {0} 条被驱动/引擎拒绝编译（不影响已完成的缓存）" -f $pipesRefused) }
+        if (([int]$art.MissingEarly) -gt 0) { $extra += ("；之后游戏又用到 {0} 条新管线，想更顺可再点「预编译管线」" -f $art.MissingEarly) }
         return [pscustomobject]@{ State = 'ok'; Text = ("缓存就绪（{0}管线 {1} 条 · 预热 {2}{3}）" -f $cnt, $pipeCount, (Format-TimeShort $when), $extra); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
     }
     if ($hasPipes) {
@@ -660,8 +806,8 @@ $tabBuild.Controls.Add((New-Label '分支' 392 268 40 22))
 $tbBranch = New-Tb $Cfg.Branch 436 264 180
 $tabBuild.Controls.Add($tbBranch)
 $tabBuild.Controls.Add((New-Label '下载到' 630 268 60 22))
-$dlDefault = $Cfg.BuildRoot
-try { $dlDefault = Join-Path $Cfg.BuildRoot 'downloaded' -ErrorAction Stop } catch { $dlDefault = $Cfg.BuildRoot + '\downloaded' }
+    $dlDefault = if ($Cfg.BuildRoot) { Combine-Path $Cfg.BuildRoot 'downloaded' } else { Combine-Path (Combine-Path $Root 'gta6') 'downloaded' }
+    if (-not $Cfg.BuildRoot) { $dlDefault = Combine-Path $Root 'downloaded' }
 $tbDlDir = New-Tb $dlDefault 694 264 270
 $tabBuild.Controls.Add($tbDlDir)
 $btnDlSrc = New-Btn '下载源码 ZIP' 14 300 160 32 $Accent
@@ -686,7 +832,7 @@ $lblKnown = New-Label '已知问题：上游 2026-11-26 的 93 提交版本在 8
 $tabBuild.Controls.Add($lblKnown)
 
 # ---------------- Tab3: 预热与启动 ----------------
-$tabRun.Controls.Add((New-Label '预热（首次/更新后执行一次）' 14 12 400 22 10))
+    $tabRun.Controls.Add((New-Label '预热（首次/更新后执行一次；「全部预热」= 先着色器、自动接管线两步）' 14 12 700 22 10))
 $btnWarmShaders = New-Btn '预热着色器' 14 40 160 38
 $btnWarmPipes = New-Btn '预编译管线' 184 40 160 38
 $btnWarmAll = New-Btn '全部预热' 354 40 160 38 $Accent
@@ -820,6 +966,8 @@ $script:warmShaders = 0
 $script:warmUnsupported = ''
 $script:warmPre = $null
 $script:autoStage = 0
+$script:pipeRounds = 0
+$script:pipeMissing = -1
 $script:bgProc = $null
 $script:bgJob = $null
 $script:rootFallbackWarned = $false
@@ -1027,27 +1175,7 @@ function Find-VictoryBuilds([string]$root) {
 }
 
 
-# 缓存/存档目录：按构建名约定（与游戏侧 env 一致）
-# 纯字符串拼路径：不碰文件系统，盘符不存在也不会报错（Join-Path 会抛 DriveNotFoundException）
-function Combine-Path([string]$base, [string]$leaf) {
-    try {
-        if (-not $base) { $base = $Root }
-        return [System.IO.Path]::Combine($base, $leaf)
-    } catch {
-        return [System.IO.Path]::Combine($Root, $leaf)
-    }
-}
 
-# 配置里的盘还在不在（U 盘/移动盘/换机器时 D: 以外的盘可能不存在）
-function Test-RootUsable([string]$path) {
-    if (-not $path) { return $false }
-    try {
-        $full = [System.IO.Path]::GetFullPath($path)
-        $root = [System.IO.Path]::GetPathRoot($full)
-        if (-not $root) { return $false }
-        return (Test-Path $root)
-    } catch { return $false }
-}
 
 function Get-BuildDirs([string]$name) {
     $cacheBase = ''
@@ -1336,8 +1464,9 @@ function Clear-StaleWarmProcs {
     return $total
 }
 
-function Start-Warm([string]$kind) {
+function Start-Warm([string]$kind, [switch]$Auto) {
     try {
+        if (-not $Auto) { $script:pipeRounds = 0; $script:pipeMissing = -1 }
         if ($script:proc -and -not $script:proc.HasExited) { Add-Log '预热已在运行'; return }
         if (-not $script:exe) { Add-Log '请先选择构建'; return }
         # 先问 exe 支不支持这些子命令：旧版 victory.exe 没有 warm / shaders，点了也是白点
@@ -1380,7 +1509,14 @@ function Start-Warm([string]$kind) {
         Remove-Item $script:outLog, $script:errLog -Force -EA SilentlyContinue
         $script:posOut = 0; $script:posErr = 0; $script:warmDone = 0; $script:warmSawDone = $false
         $script:warmKind = $kind
-        $procArgs = if ($kind -eq 'pipelines') { @('warm', '--used') } else { @('shaders', $rpf) }
+        # 管线预热默认开多少个子进程：显存小的机器少开几个（每个子进程一个 D3D12 设备）
+        $warmJobs = $env:GTA6_LAUNCHER_WARM_JOBS
+        if (-not $warmJobs) {
+            $vramGB = 8
+            if ($script:hw) { $vramGB = [math]::Round($script:hw.VramMB / 1024, 0) }
+            if ($vramGB -le 8) { $warmJobs = 4 } elseif ($vramGB -le 12) { $warmJobs = 6 } else { $warmJobs = 8 }
+        }
+        $procArgs = if ($kind -eq 'pipelines') { @('warm', '--used', '--jobs', "$warmJobs") } else { @('shaders', $rpf) }
         $script:warmTotal = if ($kind -eq 'pipelines') { 2400 } else { 26000 }
         # 预热过程中用户可能切构建：把这次预热对应的构建/版本固定下来
         $bb = $script:builds[$lstBuilds.SelectedIndex]
@@ -1804,7 +1940,7 @@ function Update-Warm {
             # 着色器阶段记录完再继续管线（即使管线阶段失败/被停止，着色器记录也不会丢）
             $script:autoStage = 1
             $progress.Value = 0
-            Start-Warm 'pipelines'
+            Start-Warm 'pipelines' -Auto
             return
         }
         $script:autoStage = 0
@@ -1817,6 +1953,38 @@ function Update-Warm {
         }
         if (-not $outcome.Complete -and $outcome.Done) {
             Add-Log '预热未完成：可以再点一次「全部预热」/「预编译管线」从中断处续传'
+        }
+        # 管线阶段：引擎遇到编不出来的管线会静默收尾（不打印汇总）。只要这一轮有进展就自动接着跑，
+        # 直到没有新进展为止——避免用户看到“点了没反应/一直说没产出”。
+        if ($kind -eq 'pipelines' -and $outcome.Done -and -not $outcome.Complete) {
+            $nowMissing = [int]$post.MissingEarly
+            $prev = [int]$script:pipeMissing
+            $progressed = ($nowMissing -ge 0) -and (($prev -lt 0) -or ($nowMissing -lt $prev))
+            $script:pipeMissing = $nowMissing
+            $script:pipeRounds = [int]$script:pipeRounds + 1
+            if ($progressed -and ([int]$script:pipeRounds -lt 8)) {
+                Add-Log ("管线预热没跑完（还差 {0} 条），引擎提前收尾 → 自动继续第 {1} 轮（已跑 {2} 轮）" -f $nowMissing, ([int]$script:pipeRounds + 1), [int]$script:pipeRounds)
+                $progress.Value = 0
+                Start-Warm 'pipelines' -Auto
+                return
+            }
+            if (-not $progressed) {
+                Add-Log ("还差 {0} 条，但这一轮没有新进展：这些管线被引擎/驱动拒绝编译（host refused），已完成的缓存不受影响" -f $nowMissing)
+                $lblStatus.Text = ("管线已尽量预热（还差 {0} 条编不出来）" -f $nowMissing)
+                # 剩下的确实编不出来：记成「已完成（含拒绝数）」，别一直显示未完成
+                try {
+                    $mk = Get-WarmMarker $script:warmCacheDir
+                    if ($mk) {
+                        $mk.PipesComplete = $true
+                        $mk.PipesDone = $true
+                        $mk.PipesRefused = [int]$nowMissing
+                        Save-WarmMarker $script:warmCacheDir $mk
+                    }
+                    [void](Update-CacheStateLabel)
+                } catch { }
+            } else {
+                Add-Log ("自动续传 {0} 轮后仍有 {1} 条未完成，可稍后再点「预编译管线」" -f [int]$script:pipeRounds, $nowMissing)
+            }
         }
     }
 }
@@ -2016,6 +2184,8 @@ function Finish-CompileAttempt([bool]$ok) {
                 Add-Log ("已部署: {0}" -f (Join-Path $dst 'victory.exe'))
             } catch { Add-Log ("部署失败: " + $_.Exception.Message) }
             $c.Ok = $true; $c.Done = $true
+            # 新 exe 可能多了/少了子命令，也可能开始支持 RENDER_SCALE：清掉能力缓存重新探测
+            try { $script:subCache.Clear(); $script:exeCapCache.Clear() } catch { }
             Scan-Builds -Async
             $lblStatus.Text = ('编译完成: ' + $c.Label)
             if ($script:updateCompile) {
@@ -3089,6 +3259,8 @@ $form.Add_FormClosing({
     try { if ('KeyMap' -as [type]) { [KeyMap]::Uninstall() } } catch { }
 })
 $form.Add_Shown({
+    # 路径是自动检测出来的（配置里留空/失效时），把结论说清楚
+    try { foreach ($n in @($script:pathNotes)) { Add-Log ("路径: " + $n) } } catch { }
     Refresh-Hw
     # 上次异常退出可能留下 warm 子进程（占 CPU、锁缓存），启动时先清掉
     try { [void](Clear-StaleWarmProcs) } catch { }
@@ -3251,22 +3423,41 @@ $form.Add_Shown({
         $form.Close()
     }
     if ($env:GTA6_LAUNCHER_WARMTEST) {
-        Start-Warm 'all'
+        # 跑到结束为止（默认 all；可用 GTA6_LAUNCHER_WARMTEST_KIND=shaders|pipelines 指定）
+        $kind = if ($env:GTA6_LAUNCHER_WARMTEST_KIND) { [string]$env:GTA6_LAUNCHER_WARMTEST_KIND } else { 'all' }
+        Start-Warm $kind
         $wt = New-Object System.Windows.Forms.Timer
-        $wt.Interval = 45000
+        $wt.Interval = 2000
         $wt.Add_Tick({
+            if ($script:proc) { return }          # 还在跑
             $this.Stop()
+            $lines = @()
             try {
-                $lines = @()
                 $lines += "warmKind=" + $script:warmKind
-                $lines += "warmDone=" + $script:warmDone + " / " + $script:warmTotal
-                $lines += "sawPipelines=" + ((Get-Content $script:outLog -EA SilentlyContinue | Select-String 'pipelines known|to make|made in' | Measure-Object).Count)
-                Set-Content -Path $env:GTA6_LAUNCHER_WARMTEST -Value ($lines -join "`r`n") -Encoding UTF8
-            } catch { }
-            Stop-Warm
-            $form.Close()
+                $lines += "warmDone=$($script:warmDone) / $($script:warmTotal)"
+                $lines += "warmFp=" + $script:warmFp
+                $lines += "warmToMake=" + $script:warmToMake + " warmMade=" + $script:warmMade + " warmShaders=" + $script:warmShaders
+                $lines += "unsupported=" + $script:warmUnsupported
+                $lines += "status=" + $lblStatus.Text
+                if ($script:cacheState) { $lines += "cacheState=$($script:cacheState.State) | $($script:cacheState.Text)" }
+                $lines += "--- findings ---"
+                $lines += @(Select-String -Path $script:outLog -Pattern 'pipelines known|to make|made in|shaders in the cache|error' -EA SilentlyContinue | Select-Object -Last 6 | ForEach-Object { $_.Line })
+            } catch { $lines += ("ERR " + $_.Exception.Message) }
+            try { Set-Content -Path $env:GTA6_LAUNCHER_WARMTEST -Value ($lines -join "`r`n") -Encoding UTF8 } catch { }
+            try { Set-Content -Path ($env:GTA6_LAUNCHER_WARMTEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
         })
         $wt.Start()
+        $wd = New-Object System.Windows.Forms.Timer
+        $wd.Interval = 2700000     # 45 分钟看门狗
+        $wd.Add_Tick({
+            $this.Stop()
+            try { Set-Content -Path $env:GTA6_LAUNCHER_WARMTEST -Value ("TIMEOUT`r`nstatus=" + $lblStatus.Text) -Encoding UTF8 } catch { }
+            try { Set-Content -Path ($env:GTA6_LAUNCHER_WARMTEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+            try { if ($script:proc) { [void](Stop-ProcTree $script:proc) } } catch { }
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+        })
+        $wd.Start()
     }
     if ($env:GTA6_LAUNCHER_LAUNCHTEST) {
         Start-Sleep -Milliseconds 500
@@ -3595,13 +3786,24 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             if ($ok7) { $pass++ } else { $fail++ }
             $lines += ("[{0}] driver-changed -> {1} | {2}" -f $(if ($ok7) { 'PASS' } else { 'FAIL' }), $s7.State, $s7.Text)
 
-            # --- 管线未编译完（early 里还有 k4 没进 warm-done）→ partial
+            # --- 记录里是「没跑完」+ early 里还有 k4 → partial（可续传）
+            #     记录里是「跑完过」+ 之后又出现新管线 → ok（只提示，不判未完成）
             $ef2 = Join-Path $c2 'pipelines\early-pipelines.txt'
             Set-Content -Path $ef2 -Value ("k1`r`nk2`r`nk3`r`nk4") -Encoding ASCII
+            $mkP = Get-WarmMarker $c2
+            $mkP.PipesComplete = $false
+            Save-WarmMarker $c2 $mkP
             $s8 = Get-CacheState $proj $exeTime $trId $c2 'commitA' $exe '566.03'
             $ok8 = ($s8.State -eq 'partial' -and $s8.MissingEarly -eq 1)
             if ($ok8) { $pass++ } else { $fail++ }
             $lines += ("[{0}] pipelines-incomplete -> {1} missingEarly={2} | {3}" -f $(if ($ok8) { 'PASS' } else { 'FAIL' }), $s8.State, $s8.MissingEarly, $s8.Text)
+
+            $mkP.PipesComplete = $true
+            Save-WarmMarker $c2 $mkP
+            $s8b = Get-CacheState $proj $exeTime $trId $c2 'commitA' $exe '566.03'
+            $ok8b = ($s8b.State -eq 'ok' -and $s8b.Text -match '之后游戏又用到 1 条新管线')
+            if ($ok8b) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] pipelines-later-growth -> {1} | {2}" -f $(if ($ok8b) { 'PASS' } else { 'FAIL' }), $s8b.State, $s8b.Text)
             Set-Content -Path $ef2 -Value ("k1`r`nk2`r`nk3") -Encoding ASCII
 
             # --- 上次预热中途被停（complete=false）→ partial（可续传，不拦启动）
@@ -3749,6 +3951,27 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
                 try { if (Test-Path $fakeDir) { Remove-Item $fakeDir -Recurse -Force -EA SilentlyContinue } } catch { }
             }
 
+            # --- 剩下的管线是“驱动/引擎编不出来”：记成已完成并把拒绝数写进文案，不再一直说未完成
+            $cR = Join-Path $env:TEMP ('gta6-refused-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            $okR = $false
+            try {
+                foreach ($i in 0..39) { New-Item -ItemType Directory -Force -Path (Join-Path $cR ("shaders\{0:x2}" -f $i)) | Out-Null }
+                Set-Content -Path (Join-Path $cR 'shaders\00\x1') -Value 'x' -Encoding ASCII
+                New-Item -ItemType Directory -Force -Path (Join-Path $cR 'pipelines') | Out-Null
+                Set-Content -Path (Join-Path $cR 'pipelines\warm-done.txt') -Value 'bbbb000000000000 k1' -Encoding ASCII
+                Set-Content -Path (Join-Path $cR 'pipelines\early-pipelines.txt') -Value ("k1`nk2") -Encoding ASCII
+                $mkR = New-WarmRecord
+                $mkR.Project = $proj; $mkR.Exe = $exe; $mkR.Commit = 'commitA'; $mkR.Translator = $trId; $mkR.Driver = '566.03'
+                $mkR.ShadersDone = $true; $mkR.ShadersComplete = $true; $mkR.ShadersTime = (Get-Date).ToString('o')
+                $mkR.PipesDone = $true; $mkR.PipesComplete = $true; $mkR.PipesRefused = 48
+                $mkR.PipesFingerprint = 'bbbb000000000000'; $mkR.PipesTime = (Get-Date).ToString('o')
+                Save-WarmMarker $cR $mkR
+                $sR = Get-CacheState $proj $exeTime $trId $cR 'commitA' $exe '566.03'
+                $okR = ($sR.State -eq 'ok') -and ($sR.Text -match '另有 48 条')
+                $lines += ("[{0}] refused-mark -> {1} | {2}" -f $(if ($okR) { 'PASS' } else { 'FAIL' }), $sR.State, $sR.Text)
+            } catch { $lines += ("  refused ERR: " + $_.Exception.Message) }
+            finally { try { if (Test-Path $cR) { Remove-Item $cR -Recurse -Force -EA SilentlyContinue } } catch { } }
+            if ($okR) { $pass++ } else { $fail++ }
             # --- A 卡 / N 卡都要认（含「核显 + 独显」的机器）
         $igpu = [pscustomobject]@{ Name = 'Intel(R) UHD Graphics 770'; AdapterRAM = 2147483648; DriverVersion = '32.0.101.5860' }
         $nvCard = [pscustomobject]@{ Name = 'NVIDIA GeForce RTX 3070'; AdapterRAM = 8589934592; DriverVersion = '621.24' }
@@ -3804,6 +4027,12 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             $lines += "driver=$($script:driverVer)"
             $lines += "cacheState=$(($script:cacheState).State) | $(($script:cacheState).Text)"
             foreach ($d in @(($script:cacheState).Details)) { $lines += "  cache: $d" }
+            $lines += "gameDir=$($tbGame.Text.Trim())"
+            $lines += "buildRoot=$($tbBuildRoot.Text.Trim())"
+            $lines += "cacheRoot=$($tbCacheRoot.Text.Trim())"
+            $lines += "saveRoot=$($tbSaveRoot.Text.Trim())"
+            $lines += "dlDir=$($tbDlDir.Text.Trim())"
+            $lines += ("pathNotes=" + (@($script:pathNotes) -join ' / '))
             $lines += "cacheDir=$($script:cacheDir)"
             $lines += "dataDir=$($script:dataDir)"
             $lines += "marker=$(Test-Path (Join-Path $script:cacheDir $script:markerName))"
@@ -3815,5 +4044,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.4 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.5 by DKTTT'
 [void]$form.ShowDialog()
