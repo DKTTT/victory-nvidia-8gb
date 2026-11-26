@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.7
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.8
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -64,6 +64,7 @@ $DefaultCfg = @{
     RaceUrl   = 'https://vuyp.github.io/gta6-pc-race/src/data.json'
     KeyMap    = ''
     KeyMapOn  = $false
+    RtOff     = $true
 }
 $Cfg = $DefaultCfg.Clone()
 if (Test-Path $ConfigPath) {
@@ -88,6 +89,7 @@ function Save-Cfg {
         if ($km -and ($km.TrimStart().StartsWith('# 每行一条'))) { $km = '' }
         $Cfg.KeyMap = $km
         $Cfg.KeyMapOn = if ($chkKeyAuto) { [bool]$chkKeyAuto.Checked } else { $false }
+        $Cfg.RtOff = if ($chkRtOff) { [bool]$chkRtOff.Checked } else { $true }
         $Cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigPath -Encoding UTF8
     } catch { }
 }
@@ -444,6 +446,17 @@ function Save-WarmMarker([string]$cacheDir, $o) {
 
 # 缓存目录里到底有什么：shaders 的桶目录、warm-done.txt 的行（按指纹分组）、
 # 以及「本机跑图用到的管线里还有多少条没编译」（early-pipelines.txt 差集）
+# 读 RT 清单：逗号/换行分隔，只保留 16 位十六进制（和引擎 parse_skip_hashes 的规则一致）
+function Get-RtSkipHashes([string]$file) {
+    if (-not $file -or -not (Test-Path $file)) { return @() }
+    try {
+        $raw = (Get-Content $file -Raw) -replace "`r?`n", ','
+        return @($raw -split ',' | ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -match '^[0-9a-fA-F]{16}$' } |
+            ForEach-Object { $_.ToLower() } | Select-Object -Unique)
+    } catch { return @() }
+}
+
 function Get-WarmArtifacts([string]$cacheDir, [string]$fingerprint) {
     $a = [pscustomobject]@{
         ShaderDirs = 0; ShaderFiles = 0
@@ -873,6 +886,13 @@ $chkOpenDir.Location = New-Object System.Drawing.Point(14, 214)
 $chkOpenDir.Size = New-Object System.Drawing.Size(300, 24)
 $chkOpenDir.ForeColor = $TextCol; $chkOpenDir.BackColor = $Bg; $chkOpenDir.Checked = $true
 $tabRun.Controls.Add($chkOpenDir)
+# 关光追：跳过 RT 绘制（按 shader 哈希匹配，A 卡 / N 卡通用；引擎侧只在 diag 构建生效）
+$chkRtOff = New-Object System.Windows.Forms.CheckBox
+$chkRtOff.Text = '关闭光追（跳过 RT 绘制，A/N 卡通用）'
+$chkRtOff.Location = New-Object System.Drawing.Point(330, 214)
+$chkRtOff.Size = New-Object System.Drawing.Size(420, 24)
+$chkRtOff.ForeColor = $TextCol; $chkRtOff.BackColor = $Bg; $chkRtOff.Checked = $true
+$tabRun.Controls.Add($chkRtOff)
 $lblCrash = New-Label '崩溃记录：0 次 / 10（满 10 次自动清理日志）' 14 248 720 22 9
 $tabRun.Controls.Add($lblCrash)
 $btnOpenLogs = New-Btn '打开日志目录' 748 244 226 32
@@ -1420,7 +1440,33 @@ function Build-Env {
         Add-Log ("构建类型: legacy（不支持 RENDER_SCALE）→ VICTORY_RESOLUTION={0}x{1}, WINDOW_PERCENT=88, CARD_BUFFERS_MB=1024" -f $legacyW, $height)
         Add-Log '提示：legacy 构建建议改用 20261126b 包；若黑屏/白屏请先试这个包'
     }
-    try { if (Test-Path $script:skipFile) { $env:VICTORY_SKIP_PIPELINES = (Get-Content $script:skipFile -Raw).Trim() } } catch { }
+    # 关光追：按 shader 哈希跳过 RT 绘制（与显卡厂商无关，A/N 卡通用）
+    # 注意：引擎里这套代码是 diagnostics 特性才编进去的 → 只有 diag 构建生效，release 会忽略
+    Remove-Item Env:VICTORY_SKIP_PIPELINES -EA SilentlyContinue
+    try {
+        $rtOn = $true
+        try { $rtOn = [bool]$chkRtOff.Checked } catch { }
+        if ($rtOn) {
+            $rtFile = ''
+            foreach ($cand in @($script:skipFile, (Combine-Path $Root 'rt_off_hashes.txt'))) {
+                if ($cand -and (Test-Path $cand)) { $rtFile = $cand; break }
+            }
+            if (-not $rtFile) {
+                Add-Log '关闭光追：这个构建没有带 rt_off_hashes.txt（scripts\ 下），本次不跳过任何绘制'
+            } else {
+                $hashes = @(Get-RtSkipHashes $rtFile)
+                if ($hashes.Count -eq 0) {
+                    Add-Log ("关闭光追：{0} 里没有有效哈希（要 16 位十六进制），本次不跳过任何绘制" -f $rtFile)
+                } else {
+                    $env:VICTORY_SKIP_PIPELINES = ($hashes -join ',')
+                    Add-Log ("关闭光追：跳过 {0} 条 RT 管线（清单 {1}，A/N 卡通用）" -f $hashes.Count, (Split-Path $rtFile -Leaf))
+                    if ($b.Profile -eq 'release') { Add-Log '  注意：跳过绘制只在 diag（诊断）构建生效，release 构建会忽略这个开关' }
+                }
+            }
+        } else {
+            Add-Log '关闭光追：已取消勾选 → 正常渲染光追'
+        }
+    } catch { Add-Log ("关闭光追设置失败: " + $_.Exception.Message) }
     return @{ Console = $console; Height = $height; Scale = $scale; Legacy = (-not $supportsScale) }
 }
 
@@ -3325,6 +3371,7 @@ $form.Add_Shown({
         if ($Cfg.KeyMap) { $txtKeyMap.Text = $Cfg.KeyMap }
         else { $txtKeyMap.Text = "# 每行一条：源键 = 目标键`r`n# CapsLock = Escape`r`n# F1 = Tab" }
         if ($Cfg.ContainsKey('KeyMapOn')) { $chkKeyAuto.Checked = [bool]$Cfg.KeyMapOn }
+        if ($Cfg.ContainsKey('RtOff')) { $chkRtOff.Checked = [bool]$Cfg.RtOff }
     } catch { }
     $raceTimer = New-Object System.Windows.Forms.Timer
     $raceTimer.Interval = 1500
@@ -4064,6 +4111,16 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             } catch { $lines += ("  refused ERR: " + $_.Exception.Message) }
             finally { try { if (Test-Path $cR) { Remove-Item $cR -Recurse -Force -EA SilentlyContinue } } catch { } }
             if ($okR) { $pass++ } else { $fail++ }
+            # --- 关光追清单：逗号/换行都能解析，只认 16 位十六进制，重复去重
+            $rtTmp = Join-Path $env:TEMP ('gta6-rt-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.txt')
+            try {
+                Set-Content -Path $rtTmp -Value ("002f8eb4802deb36,008f3e09ac72b1e0,XBOX,12`r`n009411de14bdaf7c,002f8EB4802DEB36,") -Encoding ASCII
+                $rt = @(Get-RtSkipHashes $rtTmp)
+                $okRt = ($rt.Count -eq 3) -and ($rt -contains '002f8eb4802deb36') -and ($rt -contains '009411de14bdaf7c')
+                $lines += ("[{0}] rt-hash-parse count={1}" -f $(if ($okRt) { 'PASS' } else { 'FAIL' }), $rt.Count)
+            } catch { $lines += ("  rt ERR: " + $_.Exception.Message); $okRt = $false }
+            finally { try { if (Test-Path $rtTmp) { Remove-Item $rtTmp -Force -EA SilentlyContinue } } catch { } }
+            if ($okRt) { $pass++ } else { $fail++ }
             # --- 带空格的路径要加引号（否则 victory 把 "GTA6 Xbox" 拆成两个参数）
             $q1 = Quote-Arg 'D:\Game\GTA6 Xbox v1 0 2 1 CYBERLEEK\shaders.rpf'
             $q2 = Quote-Arg 'C:\plain\victory.exe'
@@ -4160,5 +4217,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.7 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.8 by DKTTT'
 [void]$form.ShowDialog()

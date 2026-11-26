@@ -8,6 +8,23 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## [v1.9.8] - 2026-11-27
+
+### 新增：关闭光追开关（A 卡 / N 卡通用）
+
+「③ 预热与启动」新增勾选框 **关闭光追（跳过 RT 绘制，A/N 卡通用）**，默认勾选。
+
+| 项 | 说明 |
+|---|---|
+| 原理 | 通过 `VICTORY_SKIP_PIPELINES` 传一组 shader 哈希，引擎在绘制前把命中这些哈希的 RT 绘制整条跳过。**按哈希匹配，跟 NVIDIA / AMD 无关**，所以 A 卡、N 卡都能用 |
+| 清单 | 优先用构建自带的 `<构建>\scripts\rt_off_hashes.txt`；没有就找启动器目录下的 `rt_off_hashes.txt`；都没有会明确写日志「本次不跳过任何绘制」 |
+| 日志 | 启动时打印：`关闭光追：跳过 N 条 RT 管线（清单 rt_off_hashes.txt，A/N 卡通用）` / 取消勾选时打印「正常渲染光追」 |
+| 引擎限制 | 引擎里这段代码是 `#[cfg(feature = "diagnostics")]`——**只有 diag（诊断）构建生效**，`release` 构建会直接忽略。勾了但用 release 构建时，日志会提醒这一点 |
+
+> 想要 release 构建也生效，需要改引擎那一行 `cfg` 后重新编译；默认的 diag 构建（`cargo build --profile diag --features diagnostics`）本来就带。
+
+---
+
 ## [v1.9.7] - 2026-11-27
 
 ### 修复（路径带空格 → 预热/启动“闪一下就完成”）
