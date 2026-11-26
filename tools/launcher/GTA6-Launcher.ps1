@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.0
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.1
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -3285,6 +3285,33 @@ function Auto-Clean-Crashes {
     } catch { Add-Log ("自动清理崩溃日志失败: " + $_.Exception.Message) }
 }
 
+# 从游戏日志里提炼已知问题，给出可操作的建议（不只是"崩了"）
+function Get-LogDiagnosis([string]$text) {
+    $out = @()
+    if (-not $text) { return $out }
+    if ($text -match 'the library did not load it') {
+        $n = ([regex]::Matches($text, 'the library did not load it')).Count
+        $out += ("有 {0} 条管线没能从 PSO 库里读到（LoadPipeline 返回 0x80070057 = 库里没有这条）→ 运行时会现场重编，预热覆盖不到的部分会顿一下" -f $n)
+        $out += '  → 再点一次「预编译管线」把剩下的补齐；若数量一直不降，多半是驱动拒编那几条'
+    }
+    if ($text -match 'FFX FSR4[^\r\n]*FAILED hr=0x80004001') {
+        $n = ([regex]::Matches($text, 'FFX FSR4[^\r\n]*FAILED')).Count
+        $out += ("标题在走 FSR4 的管线库反序列化，HLE 没实现（E_NOTIMPL），共 {0} 次回退重编 → 每次都要现编" -f $n)
+        $out += '  → 试 VICTORY_OWN_UPSCALER=0（关掉自带升采样，让标题用自己的），或在启动器里取消「关闭光追」排除干扰'
+    }
+    if ($text -match 'device removed|0x887A0007|0x887A0006|GPU 不响应') {
+        $out += '显卡设备被驱动移除（TDR，0x887A0007）——通常是某条命令让 GPU 卡死超过 TdrDelay'
+        $out += '  → 降一档分辨率 / 关光追 / 更新显卡驱动；同时别再开别的 3D 程序（浏览器硬解、录屏都算）'
+    }
+    if ($text -match '0x887A0004') {
+        $out += '0x887A0004 = 设备接口或功能级别不受支持 → 驱动版本太老或系统不支持该 D3D12 特性'
+    }
+    if ($text -match 'build\s+unknown \(') {
+        $out += '日志里 "build unknown" 只是名字表里没有这条记录，hash 前缀 b99f876b = 1.0.2.1，分辨率补丁依然生效'
+    }
+    return $out
+}
+
 function Record-Crash([string]$reason, $tail) {
     try {
         New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
@@ -3303,7 +3330,10 @@ function Record-Crash([string]$reason, $tail) {
         # 单独存一份完整尾部，方便排查
         if ($tail -and $tail.Count -gt 0) {
             $dump = Join-Path $script:logDir ("crash-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
-            Set-Content -Path $dump -Value ($tail -join "`r`n") -Encoding UTF8
+            $diag2 = @(Get-LogDiagnosis ($tail -join "`r`n"))
+            $body = ($tail -join "`r`n")
+            if ($diag2.Count -gt 0) { $body += "`r`n`r`n--- 诊断 ---`r`n" + ($diag2 -join "`r`n") }
+            Set-Content -Path $dump -Value $body -Encoding UTF8
         }
         $script:crashCount = Get-CrashCount
         Add-Log ("已记录崩溃 #{0}：{1}（运行 {2} 秒）" -f $script:crashCount, $reason, $entry.ranSeconds)
@@ -3413,6 +3443,10 @@ $timer.Add_Tick({
             if ($text -match 'upload_file_minidump|BacktraceBreakpad|panic|device removed|0x887A0006|DXGI_ERROR_DEVICE') { $crash = $true; $reason = 'breakpad/设备移除/panic' }
             elseif ($null -ne $code -and $code -ne 0) { $crash = $true; $reason = ("退出码 {0}" -f $code) }
             elseif ($ran -gt 0 -and $ran -lt 10) { $crash = $true; $reason = ("启动 {0} 秒即退出" -f [math]::Round($ran, 1)) }
+            try {
+                $diag = @(Get-LogDiagnosis ((@($tail) -join "`n") + "`n" + $(try { if ($script:gameLog) { (Get-Content ($script:gameLog + '.err') -Tail 400 -EA SilentlyContinue) -join "`n" } else { '' } } catch { '' })))
+                foreach ($dsc in $diag) { Add-Log ("诊断: " + $dsc) }
+            } catch { }
             if ($crash) { Record-Crash $reason $tail } else { Add-Log ("游戏正常退出（运行 {0:N0} 秒）" -f $ran) }
             $script:game = $null; $script:gameStart = $null
             $btnLaunch.Enabled = $true; $lblStatus.Text = '游戏已退出'
@@ -4316,5 +4350,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.10.0 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.10.1 by DKTTT'
 [void]$form.ShowDialog()
