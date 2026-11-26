@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.6
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.7
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -16,6 +16,16 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'   # 下载时不弹蓝色进度条
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $Root 'launcher-config.json'
+
+# 传参给 exe 时必须自己加引号：Start-Process -ArgumentList 不会替带空格的路径加，
+# 结果 victory 把 "D:\Game\GTA6 Xbox ...\shaders.rpf" 按空格切成好几个参数（unexpected argument 'Xbox'）
+function Quote-Arg([string]$s) {
+    if (-not $s) { return '""' }
+    if ($s -notmatch '[\s"]') { return $s }
+    # 结尾是反斜杠时，引号会被转义：补一个反斜杠保住
+    if ($s.EndsWith('\')) { return '"' + $s + '\"' }
+    return '"' + ($s -replace '"', '\"') + '"'
+}
 
 # 纯字符串拼路径：不碰文件系统，盘符不存在也不会报错（Join-Path 会抛 DriveNotFoundException）
 function Combine-Path([string]$base, [string]$leaf) {
@@ -515,6 +525,9 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
         $shComplete = [bool]$mk.ShadersComplete
         $pipesComplete = [bool]$mk.PipesComplete
         $pipesRefused = [int]$mk.PipesRefused
+        # 记录说“完成”但缓存里根本没有对应文件（预热其实没跑起来/被参数顶掉）→ 不能算完成
+        if ($shComplete -and -not $hasShaders) { $shComplete = $false }
+        if ($pipesComplete -and -not $hasPipes) { $pipesComplete = $false }
     } elseif ($me) {
         $src = 'meta'
         try { $recTr = [string]$me.translator } catch { }
@@ -624,7 +637,11 @@ function Get-WarmOutcome([string]$kind, $exitCode, [int]$toMake, [int]$shaderCou
             return [pscustomobject]@{ Done = $done; Complete = $false; Note = ("还差 {0} 条（可续传）" -f $missing) }
         }
         # 拿不到差集：退回“开始时还有几条要做”
-        if ($toMake -eq 0) { return [pscustomobject]@{ Done = $true; Complete = $true; Note = '全部管线都已编译' } }
+        # 注意：空缓存上 warm 也会报 “0 to make”，那只是“还没有管线记录”，不是“全编完了”
+        if ($toMake -eq 0) {
+            if ($postLines -gt 0) { return [pscustomobject]@{ Done = $true; Complete = $true; Note = '全部管线都已编译' } }
+            return [pscustomobject]@{ Done = $true; Complete = $false; Note = '缓存里还没有任何管线记录：先启动一次游戏玩几分钟，再点「预编译管线」才有意义' }
+        }
         if ($grew) { return [pscustomobject]@{ Done = $true; Complete = $false; Note = '已编译一部分（可续传）' } }
         if ($codeOk -and $sawFingerprint) { return [pscustomobject]@{ Done = $true; Complete = $false; Note = '引擎报告无需再编译' } }
         return [pscustomobject]@{ Done = $false; Complete = $false; Note = ("没有产出（退出码 {0}）" -f $(if ("$exitCode" -eq '') { '无' } else { $exitCode })) }
@@ -1533,7 +1550,7 @@ function Start-Warm([string]$kind, [switch]$Auto) {
         $procArgs = if ($kind -eq 'pipelines') {
             if ($script:warmUseJobs -eq $false) { @('warm', '--used') }
             else { @('warm', '--used', '--jobs', "$warmJobs") }
-        } else { @('shaders', $rpf) }
+        } else { @('shaders', (Quote-Arg $rpf)) }
         $script:warmTotal = if ($kind -eq 'pipelines') { 2400 } else { 26000 }
         # 预热过程中用户可能切构建：把这次预热对应的构建/版本固定下来
         $bb = $script:builds[$lstBuilds.SelectedIndex]
@@ -1854,7 +1871,7 @@ function Read-WarmLine([string]$line) {
 }
 
 # 写预热记录（marker，跟着缓存目录走）+ 兼容旧版 meta；然后立即重算并刷新界面
-function Save-WarmRecord([string]$kind, $outcome, [switch]$Quiet) {
+function Save-WarmRecord([string]$kind, $outcome, [switch]$Quiet, [switch]$NoStatus) {
     try {
         $cacheDir = $script:warmCacheDir
         if (-not $cacheDir) { return $null }
@@ -1901,10 +1918,11 @@ function Save-WarmRecord([string]$kind, $outcome, [switch]$Quiet) {
             Save-Meta $mm
         } catch { }
         Add-Log ("已写预热记录: {0}" -f (Join-Path $cacheDir $script:markerName))
-        if ($Quiet) { return $null }
+        if ($Quiet -or $NoStatus) { return $null }
         $r = Update-CacheStateLabel
         if ($r) {
-            $lblStatus.Text = '预热完成 · ' + $r.State.Text
+            # 只有缓存真的就绪才说“预热完成”，否则别给假安心（以前没产出也会这么写）
+            $lblStatus.Text = if ($r.State.State -eq 'ok') { '预热完成 · ' + $r.State.Text } else { '预热结束：' + $r.State.Text }
             Add-Log ("预热后缓存状态: {0} | {1}" -f $r.State.State, $r.State.Text)
             foreach ($d in $r.State.Details) { Add-Log ("  " + $d) }
         }
@@ -1950,7 +1968,7 @@ function Update-Warm {
             Add-Log ("这个构建的 victory.exe 不认识 `"{0}`" 子命令（{1}做不了，旧版构建）" -f $sub, $what)
             Add-Log '  解决：换 20261126a/b 分发包，或自己编译一份新构建（新版 victory 才有 warm / shaders 子命令）'
             $lblStatus.Text = ('这个构建不支持' + $what + '（旧版 victory.exe）')
-            if ($kind -ne 'all') { [void](Save-WarmRecord $kind ([pscustomobject]@{ Done = $true; Complete = $false; Note = '构建不支持该子命令' })) }
+            if ($kind -ne 'all') { [void](Save-WarmRecord $kind ([pscustomobject]@{ Done = $true; Complete = $false; Note = '构建不支持该子命令' }) -NoStatus) }
         } elseif ($outcome.Done) { [void](Save-WarmRecord $kind $outcome) }
         $script:autoStage = if ($kind -eq 'all') { [int]$script:autoStage } else { 0 }
         if ($kind -eq 'all' -and $script:autoStage -eq 0) {
@@ -1964,7 +1982,16 @@ function Update-Warm {
         if ($outcome.Complete) { $progress.Value = 100 }
         $btnWarmAll.Enabled = $true; $btnWarmShaders.Enabled = $true; $btnWarmPipes.Enabled = $true
         $btnStop.Enabled = $false; $btnLaunch.Enabled = $true
-        if (-not $outcome.Done -and -not $script:warmUnsupported) {
+        if (-not $outcome.Done -and -not $script:warmUnsupported -and [int]$post.MissingEarly -lt 0) {
+            $tailTxt = ''
+            try { $tailTxt = ((Get-Content $script:errLog -EA SilentlyContinue | Select-Object -Last 3) -join ' ') } catch { }
+            if ($tailTxt -match 'unexpected argument|invalid value|error:') {
+                Add-Log '  引擎拒绝了这次调用（见上面日志）：常见是路径/参数没被正确识别'
+                if ($tailTxt -match 'unexpected argument ''([^'']+)''') {
+                    Add-Log ("  → 它把 '{0}' 当成了多余参数：说明某个带空格的路径被拆开了" -f $matches[1])
+                }
+            }
+        }        if (-not $outcome.Done -and -not $script:warmUnsupported) {
             $lblStatus.Text = '预热没有产出，请查看日志'
             Add-Log '预热没有产出：缓存文件没有变化（退出码/日志见上）'
         }
@@ -1986,13 +2013,14 @@ function Update-Warm {
                 return
             }
             # 这一轮一点没动、但整体还差很多：可能是这个构建的 warm 不认 --jobs（老版本）→ 去掉再试一次
+            if (-not $progressed -and [int]$nowMissing -lt 0) { $progressed = $false }
             if (-not $progressed -and $script:warmUseJobs -and [int]$script:pipeRounds -le 1) {
                 $script:warmUseJobs = $false
                 Add-Log '这个构建的 warm 可能不认识 --jobs 参数：去掉并发参数再试一次'
                 Start-Warm 'pipelines' -Auto
                 return
             }
-            if (-not $progressed) {
+            if (-not $progressed -and [int]$nowMissing -gt 0) {
                 Add-Log ("还差 {0} 条，但这一轮没有新进展：这些管线被引擎/驱动拒绝编译（host refused），已完成的缓存不受影响" -f $nowMissing)
                 $lblStatus.Text = ("管线已尽量预热（还差 {0} 条编不出来）" -f $nowMissing)
                 # 剩下的确实编不出来：记成「已完成（含拒绝数）」，别一直显示未完成
@@ -2086,7 +2114,7 @@ function Launch-Game {
         New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
         $script:gameLog = Join-Path $script:logDir ("game-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
         $script:gameStart = Get-Date
-        $script:game = Start-Process -FilePath $script:exe -ArgumentList @('run', $gameExe, '--execute', '--console', $envInfo.Console) `
+        $script:game = Start-Process -FilePath $script:exe -ArgumentList @('run', (Quote-Arg $gameExe), '--execute', '--console', $envInfo.Console) `
             -WorkingDirectory (Split-Path $script:exe) -PassThru `
             -RedirectStandardOutput $script:gameLog -RedirectStandardError ($script:gameLog + '.err')
         Add-Log ("游戏日志: {0}" -f $script:gameLog)
@@ -2287,7 +2315,7 @@ function Check-Update {
         if ($info.Git) {
             $gp = if ($proxy) { @('-c', "http.proxy=$proxy", '-c', "https.proxy=$proxy") } else { @() }
             Add-Log ("检查上游: {0} 分支 {1}" -f $info.Remote, $info.Branch)
-            $args = @('-C', $b.Project) + $gp + @('fetch', 'origin')
+            $args = @('-C', (Quote-Arg $b.Project)) + $gp + @('fetch', 'origin')
             [void](Start-BgProc '检查上游（git fetch）' 'git' $args $b.Project {
                 param($code, $text)
                 try {
@@ -2361,7 +2389,7 @@ function Update-Build {
             Add-Log ("已备份 exe: {0}" -f (Split-Path $bak -Leaf))
         } catch { Add-Log ("备份 exe 失败（继续）: " + $_.Exception.Message) }
         $proxy = $tbProxy.Text.Trim()
-        $gitArgs = @('-C', $b.Project)
+        $gitArgs = @('-C', (Quote-Arg $b.Project))
         if ($proxy) { $gitArgs += @('-c', "http.proxy=$proxy", '-c', "https.proxy=$proxy") }
         $gitArgs += @('pull', '--ff-only')
         $script:updateCtx = [pscustomobject]@{ Project = $b.Project; Name = $b.Name; Exe = $b.Exe; Branch = [string]$info.Branch; PreHead = [string](& git -C $b.Project rev-parse HEAD 2>$null) }
@@ -3970,6 +3998,11 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             $lines += ("[{0}] unsupported-state -> {1} | {2}" -f $(if ($okU2) { 'PASS' } else { 'FAIL' }), $(if ($sU) { $sU.State } else { 'null' }), $(if ($sU) { $sU.Text } else { '' }))
 
             # --- 跑完的预热要记成「完成」（现在按差集判定，而不是按开始时还有几条要做）
+            # 空缓存：warm 报 “0 to make”，但没有管线记录 → 不能算完成
+            $oEmpty = Get-WarmOutcome 'pipelines' 0 0 0 0 0 0 0 $true -1
+            $okEmpty = ($oEmpty.Done -eq $true) -and ($oEmpty.Complete -eq $false) -and ($oEmpty.Note -match '还没有任何管线记录')
+            if ($okEmpty) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] empty-cache-not-complete -> done={1} complete={2} | {3}" -f $(if ($okEmpty) { 'PASS' } else { 'FAIL' }), $oEmpty.Done, $oEmpty.Complete, $oEmpty.Note)
             $oW = Get-WarmOutcome 'pipelines' 0 500 0 3 520 1 1 $true 0
             $oW2 = Get-WarmOutcome 'pipelines' 0 500 0 3 520 1 1 $true 7
             $okOutcome2 = ($oW.Done -and $oW.Complete) -and ($oW2.Done -and -not $oW2.Complete)
@@ -4031,6 +4064,30 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             } catch { $lines += ("  refused ERR: " + $_.Exception.Message) }
             finally { try { if (Test-Path $cR) { Remove-Item $cR -Recurse -Force -EA SilentlyContinue } } catch { } }
             if ($okR) { $pass++ } else { $fail++ }
+            # --- 带空格的路径要加引号（否则 victory 把 "GTA6 Xbox" 拆成两个参数）
+            $q1 = Quote-Arg 'D:\Game\GTA6 Xbox v1 0 2 1 CYBERLEEK\shaders.rpf'
+            $q2 = Quote-Arg 'C:\plain\victory.exe'
+            $q3 = Quote-Arg 'C:\dir with space\'
+            $okQ = ($q1.StartsWith('"') -and $q1.EndsWith('"')) -and ($q2 -eq 'C:\plain\victory.exe') -and ($q3.EndsWith('\"'))
+            if ($okQ) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] quote-arg spaced={1} plain={2}" -f $(if ($okQ) { 'PASS' } else { 'FAIL' }), $q1, $q2)
+
+            # --- 记录说“完成”但缓存是空的（预热没真跑起来）→ 不能报就绪
+            $cE = Join-Path $env:TEMP ('gta6-emptyrec-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            $okE = $false
+            try {
+                New-Item -ItemType Directory -Force -Path $cE | Out-Null
+                $mkE = New-WarmRecord
+                $mkE.Project = $proj; $mkE.Exe = $exe; $mkE.Commit = 'commitA'; $mkE.Translator = $trId; $mkE.Driver = '566.03'
+                $mkE.ShadersDone = $true; $mkE.ShadersComplete = $true; $mkE.ShadersTime = (Get-Date).ToString('o')
+                $mkE.PipesDone = $true; $mkE.PipesComplete = $true; $mkE.PipesTime = (Get-Date).ToString('o')
+                Save-WarmMarker $cE $mkE
+                $sE = Get-CacheState $proj $exeTime $trId $cE 'commitA' $exe '566.03'
+                $okE = ($sE.State -ne 'ok')
+                $lines += ("[{0}] complete-but-empty -> {1} | {2}" -f $(if ($okE) { 'PASS' } else { 'FAIL' }), $sE.State, $sE.Text)
+            } catch { $lines += ("  emptyrec ERR: " + $_.Exception.Message) }
+            finally { try { if (Test-Path $cE) { Remove-Item $cE -Recurse -Force -EA SilentlyContinue } } catch { } }
+            if ($okE) { $pass++ } else { $fail++ }
             # --- A 卡 / N 卡都要认（含「核显 + 独显」的机器）
         $igpu = [pscustomobject]@{ Name = 'Intel(R) UHD Graphics 770'; AdapterRAM = 2147483648; DriverVersion = '32.0.101.5860' }
         $nvCard = [pscustomobject]@{ Name = 'NVIDIA GeForce RTX 3070'; AdapterRAM = 8589934592; DriverVersion = '621.24' }
@@ -4103,5 +4160,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.6 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.7 by DKTTT'
 [void]$form.ShowDialog()
