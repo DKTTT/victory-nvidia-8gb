@@ -1,0 +1,320 @@
+From 9167ed51b86fded0a45b250f4af475eecfb41501 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Thu, 26 Nov 2026 01:27:37 -0600
+Subject: [PATCH 10/10] Merge PR #77: GPU: opt-in system-RAM budget for idle
+ windows
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/victory-gpu/src/host.rs   | 140 ++++++++++++++++++++++++++++++-
+ crates/victory-gpu/src/shadow.rs | 104 +++++++++++++++++++++--
+ 2 files changed, 238 insertions(+), 6 deletions(-)
+
+diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
+index 1881b7b..d6bd8a6 100644
+--- a/crates/victory-gpu/src/host.rs
++++ b/crates/victory-gpu/src/host.rs
+@@ -408,6 +408,96 @@ fn ram_idle_for(avail_phys: Option<u64>, keep: bool) -> u64 {
+     }
+ }
+ 
++/// System-RAM pressure band for optional caches. Resident working set and
++/// private bytes describe this process; free physical and commit headroom
++/// guard the PC and other processes. Windows API queries never change the
++/// pagefile.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum RamBand {
++    Calm,
++    Watch,
++    High,
++}
++
++/// Band for one sample. Entering Watch or High needs a higher watermark than
++/// leaving it, so a value near a threshold does not toggle the policy every
++/// sample.
++pub(crate) fn ram_band(
++    previous: RamBand,
++    working: u64,
++    private: u64,
++    free_physical: u64,
++    commit_headroom: u64,
++    total_physical: u64,
++    commit_limit: u64,
++) -> RamBand {
++    const GIB: u64 = 1024 * 1024 * 1024;
++    // Fractions of the machine, so a 64 GB host is not treated like the
++    // 32 GB one. The free and headroom floors stay absolute: pressure is
++    // pressure however big the machine is.
++    let high = private * 5 >= commit_limit * 4
++        || working * 2 >= total_physical
++        || free_physical < 2 * GIB
++        || commit_headroom < GIB;
++    let watch = private * 10 >= commit_limit * 7
++        || working * 4 >= total_physical
++        || free_physical < 4 * GIB
++        || commit_headroom < 2 * GIB;
++    let wanted = if high {
++        RamBand::High
++    } else if watch {
++        RamBand::Watch
++    } else {
++        RamBand::Calm
++    };
++    let safe_high = private * 20 <= commit_limit * 13
++        && working * 4 <= total_physical
++        && free_physical >= 4 * GIB
++        && commit_headroom >= 3 * GIB;
++    let safe_watch = private * 5 <= commit_limit * 3
++        && working * 5 <= total_physical
++        && free_physical >= 6 * GIB
++        && commit_headroom >= 3 * GIB;
++    match (previous, wanted) {
++        (RamBand::High, RamBand::Calm) if !safe_high => RamBand::Watch,
++        (RamBand::Watch, RamBand::Calm) if !safe_watch => RamBand::Watch,
++        _ => wanted,
++    }
++}
++
++/// The six numbers [`ram_band`] needs, from Windows. `None` if a query fails,
++/// so a caller can keep its old band instead of guessing.
++#[cfg(windows)]
++pub(crate) fn ram_sample() -> Option<(u64, u64, u64, u64, u64, u64)> {
++    use windows_sys::Win32::System::ProcessStatus::{
++        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
++    };
++    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
++    use windows_sys::Win32::System::Threading::GetCurrentProcess;
++    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
++    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
++    // SAFETY: plain data the call fills in.
++    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
++        return None;
++    }
++    let mut c = PROCESS_MEMORY_COUNTERS {
++        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
++        ..Default::default()
++    };
++    // SAFETY: our own process and a sized structure.
++    if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } == 0 {
++        return None;
++    }
++    Some((
++        c.WorkingSetSize as u64,
++        c.PagefileUsage as u64,
++        m.ullAvailPhys,
++        m.ullAvailPageFile,
++        m.ullTotalPhys,
++        m.ullTotalPageFile,
++    ))
++}
++
+ /// How many references are held on a host object (its COM count): ours
+ /// all, since the host's views and commands hold none. A buffer or texture
+ /// with one is held by its owner alone: no descriptor slot keeps it
+@@ -10404,9 +10494,57 @@ mod refresh_tests {
+ 
+ #[cfg(test)]
+ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at the top of this file
+-    use super::Batch;
++    use super::{Batch, RamBand, ram_band};
+     use std::sync::Arc;
+ 
++    #[test]
++    fn ram_band_tracks_resident_and_commit_pressure() {
++        const M: u64 = 1 << 20;
++        // The measured local Series S baseline stayed calm (32 GB machine,
++        // roughly 11 GB commit limit).
++        assert_eq!(
++            ram_band(RamBand::Calm, 3857 * M, 7500 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M),
++            RamBand::Calm
++        );
++        // Private commit alone crosses the watch watermark.
++        assert_eq!(
++            ram_band(RamBand::Calm, 3857 * M, 8200 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M),
++            RamBand::Watch
++        );
++        // The measured Series X commit failure was High.
++        assert_eq!(
++            ram_band(RamBand::Calm, 4452 * M, 10191 * M, 16047 * M, 154 * M, 32 * 1024 * M, 11 * 1024 * M),
++            RamBand::High
++        );
++    }
++
++    #[test]
++    fn ram_band_exits_only_below_lower_watermarks() {
++        const M: u64 = 1 << 20;
++        assert_eq!(
++            ram_band(RamBand::High, 4452 * M, 8900 * M, 16047 * M, 1200 * M, 32 * 1024 * M, 11 * 1024 * M),
++            RamBand::Watch,
++            "just under the entry mark does not drop straight to calm"
++        );
++        assert_eq!(
++            ram_band(RamBand::Watch, 3857 * M, 6600 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M),
++            RamBand::Calm,
++            "all lower watermarks met"
++        );
++    }
++
++    #[test]
++    fn ram_band_does_not_toggle_below_the_entry_watermark() {
++        const M: u64 = 1 << 20;
++        let mut band = RamBand::Calm;
++        for private in [7500 * M, 8200 * M, 8200 * M, 8200 * M] {
++            band = ram_band(band, 3857 * M, private, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M);
++        }
++        assert_eq!(band, RamBand::Watch);
++        band = ram_band(band, 3857 * M, 7800 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M);
++        assert_eq!(band, RamBand::Watch);
++    }
++
+     #[test]
+     fn a_texture_is_checked_once_per_submission() {
+         let mut batch = Batch::default();
+diff --git a/crates/victory-gpu/src/shadow.rs b/crates/victory-gpu/src/shadow.rs
+index 5cffa1d..c5bea01 100644
+--- a/crates/victory-gpu/src/shadow.rs
++++ b/crates/victory-gpu/src/shadow.rs
+@@ -2924,6 +2924,49 @@ pub(crate) fn window_use() -> [u64; 8] {
+     out
+ }
+ 
++/// Optional byte cap for loose title-window copies, in MiB. Unset or `0`
++/// keeps today's sweep. A positive value caps the copies only in the Watch
++/// and High RAM bands; Calm is unchanged.
++fn window_budget() -> Option<u64> {
++    static MB: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
++    *MB.get_or_init(|| {
++        std::env::var("VICTORY_WINDOW_BUDGET_MB")
++            .ok()
++            .and_then(|v| v.trim().parse::<u64>().ok())
++            .filter(|&v| v > 0)
++            .map(|v| v.saturating_mul(1 << 20))
++    })
++}
++
++/// Oldest eligible copies to remove until their unique bytes fit `keep`.
++/// Entries are `(last-used moment, bytes, unique copy identity)`, already
++/// sorted oldest first; one copy standing under several keys counts once.
++fn window_victims(entries: &[(u64, u64, usize)], keep: u64) -> Vec<usize> {
++    let mut left = 0u64;
++    let mut seen = std::collections::HashSet::new();
++    for &(_, bytes, id) in entries {
++        if seen.insert(id) {
++            left = left.saturating_add(bytes);
++        }
++    }
++    let mut out = Vec::new();
++    for (i, &(_, bytes, id)) in entries.iter().enumerate() {
++        if left <= keep {
++            break;
++        }
++        if seen.remove(&id) {
++            left = left.saturating_sub(bytes);
++            out.push(i);
++        }
++    }
++    out
++}
++
++/// Kept between sweeps so one sample near a watermark does not toggle the
++/// policy on the next submission.
++static WINDOW_BAND: std::sync::Mutex<crate::host::RamBand> =
++    std::sync::Mutex::new(crate::host::RamBand::Calm);
++
+ /// Lets go of the copies of windows outside buffers that nothing names any
+ /// more. They were never freed, and the world's streaming keeps asking for
+ /// new ones: 648 windows (2.8 GB) when the cutscene began, 974 (4.3 GB)
+@@ -2940,6 +2983,26 @@ pub(crate) fn window_use() -> [u64; 8] {
+ /// again. Called before a submission starts, by the thread that submits.
+ pub(crate) fn let_go_idle() {
+     const IDLE_FRAMES: u64 = 4;
++    let budget = window_budget();
++    let mut idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
++    let mut keep = u64::MAX;
++    if let Some(bytes) = budget {
++        if let Some((working, private, free, commit, total, limit)) = crate::host::ram_sample() {
++            let mut band = WINDOW_BAND.lock().unwrap_or_else(|e| e.into_inner());
++            *band = crate::host::ram_band(*band, working, private, free, commit, total, limit);
++            match *band {
++                crate::host::RamBand::Calm => {}
++                crate::host::RamBand::Watch => {
++                    idle_ms = idle_ms.min(10_000);
++                    keep = bytes;
++                }
++                crate::host::RamBand::High => {
++                    idle_ms = idle_ms.min(2_000);
++                    keep = bytes / 2;
++                }
++            }
++        }
++    }
+     let gone: Vec<Arc<Shadow>> = {
+         // Held from the look to the removal: `loose` hands a copy out
+         // under the same lock, so none is handed out in between.
+@@ -2947,17 +3010,28 @@ pub(crate) fn let_go_idle() {
+         if map.is_empty() {
+             return;
+         }
+-        let idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+-        let idle: Vec<(u64, u64)> = map
++        let mut eligible: Vec<(u64, (u64, u64), usize, u64)> = map
+             .iter()
+             .filter(|(_, s)| {
+                 Arc::strong_count(s) == 1
+                     && crate::host::long_ago(s.used.load(Ordering::Relaxed), idle_ms, IDLE_FRAMES)
+                     && crate::host::references(&s.buffer) == 1
+             })
+-            .map(|(key, _)| *key)
++            .map(|(&key, s)| {
++                (s.used.load(Ordering::Relaxed), key, Arc::as_ptr(s) as usize, s.len)
++            })
+             .collect();
+-        idle.into_iter().filter_map(|key| map.remove(&key)).collect()
++        eligible.sort_unstable_by_key(|&(used, _, _, _)| used);
++        let victims = if keep == u64::MAX {
++            (0..eligible.len()).collect()
++        } else {
++            let entries: Vec<(u64, u64, usize)> = eligible
++                .iter()
++                .map(|&(used, _, id, len)| (used, len, id))
++                .collect();
++            window_victims(&entries, keep)
++        };
++        victims.into_iter().filter_map(|i| map.remove(&eligible[i].1)).collect()
+     };
+     if !gone.is_empty() {
+         let (went, bytes) = (gone.len(), gone.iter().map(|s| s.len).sum::<u64>());
+@@ -5617,9 +5691,29 @@ pub(crate) fn exact_line(frames: f64) {
+ mod window_tests {
+     use super::{
+         WINDOW, cover, default_card_limits_mb, grid, holder, longest_tail, resolve_card_limits,
+-        tail_of, window_of,
++        tail_of, window_of, window_victims,
+     };
+ 
++    #[test]
++    fn window_budget_evicts_oldest_only_until_it_fits() {
++        const M: u64 = 1 << 20;
++        // Oldest first: 10, 20 and 30 MiB. Keeping 50 MiB must free only the
++        // oldest copy (60 MiB left before, 50 MiB after).
++        let entries = [(1u64, 10 * M, 1usize), (2, 20 * M, 2), (3, 30 * M, 3)];
++        assert_eq!(window_victims(&entries, 50 * M), vec![0]);
++        // A tighter cap takes the newest as well.
++        assert_eq!(window_victims(&entries, 20 * M), vec![0, 1, 2]);
++    }
++
++    #[test]
++    fn window_budget_counts_one_copy_under_several_keys_once() {
++        const M: u64 = 1 << 20;
++        // The first two entries are one copy; 50 MiB is live, not 80.
++        // Without dedupe both would be picked to reach a 40 MiB cap.
++        let entries = [(1u64, 30 * M, 7usize), (2, 30 * M, 7), (3, 20 * M, 8)];
++        assert_eq!(window_victims(&entries, 40 * M), vec![0]);
++    }
++
+     #[test]
+     fn card_limits_scale_with_local_vram_budget() {
+         const GIB: u64 = 1 << 30;
+-- 
+2.56.1.windows.1
+

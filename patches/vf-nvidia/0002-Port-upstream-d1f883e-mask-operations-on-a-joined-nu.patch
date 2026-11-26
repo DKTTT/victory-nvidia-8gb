@@ -1,0 +1,400 @@
+From f31411b81558a7096e5207079edd596e99540df5 Mon Sep 17 00:00:00 2001
+From: lead <lead@local>
+Date: Thu, 26 Nov 2026 15:27:20 +0800
+Subject: [PATCH 2/3] Port upstream d1f883e: mask operations on a joined number
+ read as data are its number
+
+---
+ apps/victory/src/translate.rs                 |   2 +-
+ .../src/emit/intersect_tests.rs               | 159 +++++++++++++++++-
+ crates/victory-shader/src/emit/lower.rs       | 115 +++++++++++++
+ crates/victory-shader/src/emit/mod.rs         |  31 ++++
+ 4 files changed, 305 insertions(+), 2 deletions(-)
+
+diff --git a/apps/victory/src/translate.rs b/apps/victory/src/translate.rs
+index faa68c1..3ec3c89 100644
+--- a/apps/victory/src/translate.rs
++++ b/apps/victory/src/translate.rs
+@@ -605,7 +605,7 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
+                 if let (Some(r), Some(i), Some(s)) = (res, raised, structured) {
+                     let label = || format!("{} {:?}", example(), p.stage);
+                     *counter(t, p.stage, 0) += 1;
+-                    match emit::emit(container, &p, &program, &s, &i, &r) {
++                    match emit::emit_with_retries(container, &p, &program, &s, &i, &r) {
+                         Ok(shader) => {
+                             census_line(&label(), &p, &program, &shader);
+                             *counter(t, p.stage, 1) += 1;
+diff --git a/crates/victory-shader/src/emit/intersect_tests.rs b/crates/victory-shader/src/emit/intersect_tests.rs
+index 91143f6..dd21ec3 100644
+--- a/crates/victory-shader/src/emit/intersect_tests.rs
++++ b/crates/victory-shader/src/emit/intersect_tests.rs
+@@ -194,7 +194,6 @@ pub(super) fn build_compute_shader(
+         root_srvs: lowered.root_srvs,
+         root_uavs: lowered.root_uavs,
+         root_indexed_views: res.root_indexed_views.clone(),
+-        half_views: lowered.half_views,
+     };
+     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+         let mut copy = shader.dxil.clone();
+@@ -701,3 +700,161 @@ fn a_structure_that_returns_triangle_ids_is_refused_by_name() {
+         other => panic!("{:?}", other.map(|_| ())),
+     }
+ }
++
++/// A buffer view picked from the table at an index the program computes,
++/// whose dwords 0 and 1 the program reads as numbers (the tracer takes its
++/// structure's address so, by an index from a constant buffer): they are
++/// the view's title address from the host's table by view heap slot, after
++/// the strides in the same root view.
++#[test]
++fn a_picked_views_address_comes_from_the_hosts_table() {
++    use super::{SLOT_STRIDES, SLOT_STRIDES_BYTES, VIEW_ADDRESSES};
++    let words = [
++        0xBE85_0380, // s_mov_b32 s5, 0
++        0x8F06_8500, // s_lshl_b32 s6, s0, 5
++        0xF408_0202,
++        0x0C00_0000, // s_load_dwordx4 s[8:11], s[4:5], s6
++        0xF408_0302,
++        0xFA00_0020, // s_load_dwordx4 s[12:15], s[4:5], 0x20
++        0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
++        0x7E02_0208, // v_mov_b32 v1, s8
++        0x7E04_0209, // v_mov_b32 v2, s9
++        0x342A_0083, // v_lshlrev_b32 v21, 3, v0
++        0xE074_1000,
++        0x8003_0115, // buffer_store_dwordx2 v[1:2], v21, s[12:15], 0 offen
++        0xBF81_0000, // s_endpgm
++    ];
++    let (shader, _) = build_compute_shader(&native(&words)).expect("the program lowers");
++    assert!(shader.root_srvs.contains(&SLOT_STRIDES), "{:?}", shader.root_srvs);
++    assert!(
++        !shader.user_data.iter().any(|u| u.root == RootType::Other(super::USER_VIEW_ADDRESS)),
++        "no host word for a fixed place"
++    );
++    let mut table = vec![0u32; SLOT_STRIDES_BYTES as usize / 4];
++    let at = VIEW_ADDRESSES as usize / 4;
++    // Slot 2, the one picked; slot 0 as a decoy.
++    table[at..at + 2].copy_from_slice(&[0xdead_0000, 0xdd]);
++    table[at + 4..at + 6].copy_from_slice(&[0x1234_5600, 0x42]);
++    let _one = super::valu_tests::ONE_AT_A_TIME
++        .lock()
++        .unwrap_or_else(|e| e.into_inner());
++    let mut ran = 0;
++    for (label, warp) in [("hardware", false), ("warp", true)] {
++        let Ok(host) = Host::new(warp) else {
++            eprintln!("no SM 6.6 {label} device; skipped");
++            continue;
++        };
++        let (root, pso) = host
++            .compute_pipeline(&shader)
++            .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
++        let decoy = [7u32; 4];
++        let out = host
++            .dispatch(
++                &root,
++                &pso,
++                &Dispatch {
++                    // s0: the picked view's place in the table (slot 2).
++                    roots: vec![
++                        (0, Root::Constants(vec![2, 0, 0, 0, 0])),
++                        (1, Root::View { srv: true, data: table.clone() }),
++                    ],
++                    views: &[
++                        View::Buffer { data: &decoy, stride: Stride::Raw },
++                        View::RawUav(8 * THREADS),
++                        View::Buffer { data: &decoy, stride: Stride::Raw },
++                    ],
++                    samplers: &[],
++                    groups: [1, 1, 1],
++                },
++            )
++            .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
++        for t in 0..THREADS as usize {
++            assert_eq!(out[0][2 * t..2 * t + 2], [0x1234_5600, 0x42], "{label} thread {t}");
++        }
++        ran += 1;
++    }
++    assert!(ran > 0, "no SM 6.6 device available");
++}
++
++/// A register that holds a lane mask on one path and a number on the other
++/// (the ray tracer's SGPRs reused between saved masks and constant-buffer
++/// fields), joined where the wave takes one edge, then cut with mask
++/// operations and read as a number: the mask operations compute on the
++/// numbers (`sop`), and the read is the console's register.
++#[test]
++fn mask_operations_on_a_joined_number_give_the_number() {
++    let words = [
++        0xBE85_0380, // s_mov_b32 s5, 0
++        0xF408_0302,
++        0xFA00_0020, // s_load_dwordx4 s[12:15], s[4:5], 0x20
++        0x7D88_0098, // v_cmp_gt_u32 vcc_lo, 24, v0
++        0x8706_7E6A, // s_and_b32 s6, vcc_lo, exec_lo (lanes 0-23)
++        0xBF06_8000, // s_cmp_eq_u32 s0, 0
++        0xBF85_0001, // s_cbranch_scc1 +1
++        0x8106_8101, // s_add_i32 s6, s1, 1 (a number)
++        0x8707_FF06,
++        0x00FF_00FF, // s_and_b32 s7, s6, 0x00ff00ff
++        0x8808_0207, // s_or_b32 s8, s7, s2
++        0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
++        0x7E02_0208, // v_mov_b32 v1, s8
++        0x342A_0082, // v_lshlrev_b32 v21, 2, v0
++        0xE070_1000,
++        0x8003_0115, // buffer_store_dword v1, v21, s[12:15], 0 offen
++        0xBF81_0000, // s_endpgm
++    ];
++    // On the first try refused, as before (programs that translate so do
++    // not change); `translate` tries such a program once more with mask
++    // operations on numbers read as numbers.
++    match build_compute_shader(&native(&words)) {
++        Err(ShaderError::Unsupported { what, .. }) => assert_eq!(what, lower::MASK_ELSEWHERE),
++        other => panic!("{:?}", other.map(|_| ())),
++    }
++    let (shader, _) = lower::with_mask_ops_on_numbers(|| build_compute_shader(&native(&words)))
++        .expect("the program lowers");
++    let _one = super::valu_tests::ONE_AT_A_TIME
++        .lock()
++        .unwrap_or_else(|e| e.into_inner());
++    // The hardware device only: the program declares the console's 32
++    // lanes (its wave operations), which WARP does not take.
++    let mut ran = 0;
++    for (label, warp) in [("hardware", false)] {
++        let Ok(host) = Host::new(warp) else {
++            eprintln!("no SM 6.6 {label} device; skipped");
++            continue;
++        };
++        let (root, pso) = match host.compute_pipeline(&shader) {
++            Ok(x) => x,
++            Err(e) => {
++                eprintln!("the {label} device does not take this program (waves of 64?): {e}; not run");
++                continue;
++            }
++        };
++        let unused = [0u32; 4];
++        for (constants, want) in [
++            // The mask's path: lanes 0-23 as the number.
++            ([0, 0x1234_5678, 0x0100_0000], 0x01FF_00FF),
++            // The number's path.
++            ([1, 0x1234_5678, 0x0100_0000], 0x0134_0079),
++        ] {
++            let out = host
++                .dispatch(
++                    &root,
++                    &pso,
++                    &Dispatch {
++                        roots: vec![(0, Root::Constants([&constants[..], &[0, 0]].concat()))],
++                        views: &[View::Buffer { data: &unused, stride: Stride::Raw }, View::RawUav(4 * THREADS)],
++                        samplers: &[],
++                        groups: [1, 1, 1],
++                    },
++                )
++                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
++            for t in 0..THREADS as usize {
++                assert_eq!(out[0][t], want, "{label} {constants:x?} thread {t}");
++            }
++        }
++        ran += 1;
++    }
++    if ran == 0 {
++        eprintln!("not run on a device; lowered only");
++    }
++}
+diff --git a/crates/victory-shader/src/emit/lower.rs b/crates/victory-shader/src/emit/lower.rs
+index 326f88f..736472a 100644
+--- a/crates/victory-shader/src/emit/lower.rs
++++ b/crates/victory-shader/src/emit/lower.rs
+@@ -1178,6 +1178,24 @@ pub(super) fn with_first_half_pairs<R>(translate: impl FnOnce() -> R) -> R {
+     result
+ }
+ 
++thread_local! {
++    /// Whether a mask operation on numbers read as data is the number it
++    /// computes ([`with_mask_ops_on_numbers`]).
++    static MASK_OPS_ON_NUMBERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++}
++
++/// Runs `translate` with 32-bit scalar bit operations that structurisation
++/// took for lane masks, but whose operands are numbers, read as data as the
++/// numbers they compute (`Lower::mask_op_on_numbers`): the translation of a
++/// program refused with [`MASK_ELSEWHERE`] and only of such a program, so
++/// no program that translated without it changes.
++pub(super) fn with_mask_ops_on_numbers<R>(translate: impl FnOnce() -> R) -> R {
++    let before = MASK_OPS_ON_NUMBERS.replace(true);
++    let result = translate();
++    MASK_OPS_ON_NUMBERS.set(before);
++    result
++}
++
+ pub(super) fn host_max_wave() -> u32 {
+     #[cfg(test)]
+     if let Some(lanes) = TEST_HOST_WAVE.get() {
+@@ -3498,9 +3516,96 @@ impl<'a> Lower<'a> {
+         Ok(())
+     }
+ 
++    /// The number a 32-bit scalar bit operation (`s_and_b32`, `s_or_b32`,
++    /// ...) that structurisation took for a lane mask computes, where its
++    /// operands are numbers: constants, root constants, values lowered as
++    /// numbers (a join of a mask and data, `phis`), or such operations
++    /// again. Computed in the current block, which their definitions
++    /// dominate. Only with console lanes, where a mask joined as data is the
++    /// console's number. None where an operand is a lane mask.
++    fn mask_op_on_numbers(&mut self, v: Value, depth: u32) -> Option<V> {
++        if let Some(&Val::I32(x)) = self.vals.get(&v) {
++            // (A join read so is lowered as the number its paths bring.)
++            if self.phi_at.contains_key(&v) {
++                self.read_phis.insert(v);
++            }
++            return Some(x);
++        }
++        if self.mask_data != MaskData::Console || depth > 16 {
++            return None;
++        }
++        if self.params.contains_key(&v) {
++            return match self.get(v) {
++                Ok(Val::I32(x)) => Some(x),
++                _ => None,
++            };
++        }
++        let x = self.x;
++        let inst: &Inst = x
++            .p
++            .blocks
++            .iter()
++            .flat_map(|b| &b.insts)
++            .find(|i| i.writes.iter().any(|w| w.1 == v && matches!(w.0, Reg::S(_))))?;
++        let Fields::Sop { src, .. } = &inst.fields else {
++            return None;
++        };
++        let op = inst.name().strip_prefix("s_")?.strip_suffix("_b32")?;
++        if !matches!(op, "and" | "or" | "xor" | "andn2" | "orn2" | "nand" | "nor" | "xnor" | "not" | "mov") {
++            return None;
++        }
++        let mut xs = Vec::with_capacity(2);
++        for o in src {
++            let n = match *o {
++                Operand::Scalar { code, .. } if code != NULL => {
++                    let r = inst.read(Reg::S(code))?;
++                    self.mask_op_on_numbers(r, depth + 1)?
++                }
++                Operand::Scalar { .. } => self.s.m.i32(0),
++                Operand::Literal(k) => self.s.m.i32(k),
++                Operand::Const(k) => self.s.m.i32(crate::resource::inline(k)?),
++                _ => return None,
++            };
++            xs.push(n);
++        }
++        let c = self.cur;
++        let ones = self.s.m.i32(u32::MAX);
++        let not = |l: &mut Self, a: V| l.s.m.bin(c, Bin::Xor, a, ones);
++        let r = match (op, &xs[..]) {
++            ("mov", &[a]) => a,
++            ("not", &[a]) => not(self, a),
++            ("and", &[a, b]) => self.s.m.bin(c, Bin::And, a, b),
++            ("or", &[a, b]) => self.s.m.bin(c, Bin::Or, a, b),
++            ("xor", &[a, b]) => self.s.m.bin(c, Bin::Xor, a, b),
++            ("andn2", &[a, b]) => {
++                let nb = not(self, b);
++                self.s.m.bin(c, Bin::And, a, nb)
++            }
++            ("orn2", &[a, b]) => {
++                let nb = not(self, b);
++                self.s.m.bin(c, Bin::Or, a, nb)
++            }
++            ("nand", &[a, b]) => {
++                let t = self.s.m.bin(c, Bin::And, a, b);
++                not(self, t)
++            }
++            ("nor", &[a, b]) => {
++                let t = self.s.m.bin(c, Bin::Or, a, b);
++                not(self, t)
++            }
++            ("xnor", &[a, b]) => {
++                let t = self.s.m.bin(c, Bin::Xor, a, b);
++                not(self, t)
++            }
++            _ => return None,
++        };
++        Some(r)
++    }
++
+     /// A dword of a lane mask as a number: the ballot of the lanes' bits,
+     /// taken in the block that writes the mask (see [`MaskData`]).
+     fn mask_dword(&mut self, v: Value) -> Result<V, Why> {
++        // A mask operation on numbers (`sop`): its number is known.
+         let (lo, high) = match self.x.st.highs.get(&v) {
+             Some(&lo) => (lo, true),
+             None => (v, false),
+@@ -3512,6 +3617,16 @@ impl<'a> Lower<'a> {
+         let made = self.def_block.get(&lo).copied();
+         let whole = self.exchange.is_some() && !self.local && made.is_none_or(|b| self.all_lanes(b));
+         if !self.x.st.active.contains(&lo) && !whole {
++            // Bits taken out of a register that joins a lane mask and data,
++            // lowered as the number it is (the ray tracer's SGPRs, reused
++            // between saved masks and constant-buffer fields): on numbers
++            // the mask operations give the console's number.
++            if !high
++                && MASK_OPS_ON_NUMBERS.get()
++                && let Some(x) = self.mask_op_on_numbers(lo, 0)
++            {
++                return Ok(x);
++            }
+             if self.exchange.is_some() && !self.local {
+                 need(made.unwrap_or(0));
+             }
+diff --git a/crates/victory-shader/src/emit/mod.rs b/crates/victory-shader/src/emit/mod.rs
+index 85a9e0f..f61d91a 100644
+--- a/crates/victory-shader/src/emit/mod.rs
++++ b/crates/victory-shader/src/emit/mod.rs
+@@ -407,11 +407,20 @@ pub struct UserData {
+ /// with that on for every program, 8,551 pixel programs of the title that
+ /// already translated came out changed (an extra evaluation in each), for
+ /// the sake of 9 that did not translate.
++///
++/// A program refused at a lane mask with lanes elsewhere read as data is
++/// translated once more with mask operations on numbers read as the
++/// numbers they compute (`lower::with_mask_ops_on_numbers`), and only such
++/// a program: with that on for every program, 69 compute programs that
++/// already translated came out changed (`CS_RaytracingResolve`, ...).
+ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
+     match translate_plain(container) {
+         Err(ShaderError::Unsupported { what, .. }) if what == lower::FIRST_HALF => {
+             lower::with_first_half_pairs(|| translate_plain(container))
+         }
++        Err(ShaderError::Unsupported { what, .. }) if what == lower::MASK_ELSEWHERE => {
++            lower::with_mask_ops_on_numbers(|| translate_plain(container))
++        }
+         other => other,
+     }
+ }
+@@ -444,6 +453,28 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
+     emit(&c, &native, &p, &st, &io, &res)
+ }
+ 
++/// [`emit`] with the same second tries as [`translate`] (first halves of
++/// interpolations as pairs, mask operations on numbers), for tools that
++/// run the stages themselves.
++pub fn emit_with_retries(
++    c: &Container,
++    native: &NativeProgram,
++    p: &ir::Program,
++    st: &structure::Structured,
++    io: &io::Io,
++    res: &resource::Resources,
++) -> Result<HostShader, ShaderError> {
++    match emit(c, native, p, st, io, res) {
++        Err(ShaderError::Unsupported { what, .. }) if what == lower::FIRST_HALF => {
++            lower::with_first_half_pairs(|| emit(c, native, p, st, io, res))
++        }
++        Err(ShaderError::Unsupported { what, .. }) if what == lower::MASK_ELSEWHERE => {
++            lower::with_mask_ops_on_numbers(|| emit(c, native, p, st, io, res))
++        }
++        other => other,
++    }
++}
++
+ /// Emits a program whose earlier stages already ran.
+ pub fn emit(
+     c: &Container,
+-- 
+2.56.1.windows.1
+

@@ -1,0 +1,1025 @@
+From e36699dbcf4117b404bee271ed84d40ad111af8a Mon Sep 17 00:00:00 2001
+From: lead <lead@local>
+Date: Thu, 26 Nov 2026 17:11:32 +0800
+Subject: [PATCH] Local: render-scale hooks, two-plane compose port, BCPack
+ cache, NVIDIA scripts
+
+---
+ Cargo.lock                                 |   1 +
+ crates/victory-gpu/src/compose.rs          | 244 +++++++++++++++++++
+ crates/victory-gpu/src/host.rs             |  32 ++-
+ crates/victory-gpu/src/lib.rs              |   2 +
+ crates/victory-gpu/src/queue.rs            |  60 ++++-
+ crates/victory-hle/Cargo.toml              |   1 +
+ crates/victory-hle/src/modules/dstorage.rs | 108 ++++++++-
+ crates/victory-loader/src/hooks.rs         | 258 +++++++++++++++++++++
+ crates/victory-loader/src/lib.rs           |   3 +
+ crates/victory-loader/src/windows.rs       |  16 ++
+ scripts/play-nvidia.ps1                    | 107 +++++++++
+ scripts/rt_off_hashes.txt                  |  13 ++
+ 12 files changed, 834 insertions(+), 11 deletions(-)
+ create mode 100644 crates/victory-gpu/src/compose.rs
+ create mode 100644 crates/victory-loader/src/hooks.rs
+ create mode 100644 scripts/play-nvidia.ps1
+ create mode 100644 scripts/rt_off_hashes.txt
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 29bab8c..ffb4473 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -689,6 +689,7 @@ dependencies = [
+ name = "victory-hle"
+ version = "0.1.0"
+ dependencies = [
++ "blake3",
+  "opus-pure",
+  "tempfile",
+  "tracing",
+diff --git a/crates/victory-gpu/src/compose.rs b/crates/victory-gpu/src/compose.rs
+new file mode 100644
+index 0000000..9aa45cb
+--- /dev/null
++++ b/crates/victory-gpu/src/compose.rs
+@@ -0,0 +1,244 @@
++//! Ported from fxceless/victory-gta6 PR #1189 (Series S interface plane), `VICTORY_COMPOSE=1`.
++//! A present's second plane laid over its first.
++//!
++//! A Series S title presents two planes (run 2026-11-25: plane 0 the
++//! game, 1920x1080 or what the display mode makes it, plane 1 the
++//! interface, 3840x2160); the console's display lays the second over the
++//! first and scales both to the screen. The host shows one texture, so
++//! the interface is laid over the game here, at the game plane's size,
++//! into a texture of ours that is shown instead (filtered: the interface
++//! is scaled down). shortcut: the planes' placement and source rectangles
++//! are not read; both cover the screen. The interface's alpha is taken as
++//! straight (`VICTORY_PLANE_PREMULTIPLIED=1`: premultiplied).
++
++use std::sync::Mutex;
++
++use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
++use windows::Win32::Graphics::Direct3D::ID3DBlob;
++use windows::Win32::Graphics::Direct3D12::*;
++use windows::Win32::Graphics::Dxgi::Common::*;
++
++/// Frames of descriptors in the ring (three each): presents in flight
++/// must not find theirs rewritten.
++const SLOTS: u32 = 16;
++
++const SOURCE: &str = r#"
++#define RS "RootConstants(num32BitConstants=3, b0), DescriptorTable(SRV(t0, numDescriptors=2), UAV(u0)), StaticSampler(s0, filter=FILTER_MIN_MAG_MIP_LINEAR, addressU=TEXTURE_ADDRESS_CLAMP, addressV=TEXTURE_ADDRESS_CLAMP)"
++cbuffer Size : register(b0) { uint w; uint h; uint premultiplied; };
++Texture2D<float4> game : register(t0);
++Texture2D<float4> ui : register(t1);
++RWTexture2D<float4> outp : register(u0);
++SamplerState linear_clamp : register(s0);
++[RootSignature(RS)]
++[numthreads(8, 8, 1)]
++void main(uint3 id : SV_DispatchThreadID) {
++    if (id.x >= w || id.y >= h) return;
++    float2 uv = (float2(id.xy) + 0.5) / float2(w, h);
++    float4 g = game.Load(int3(id.xy, 0));
++    float4 u = ui.SampleLevel(linear_clamp, uv, 0);
++    float3 c = premultiplied != 0 ? g.rgb * (1.0 - u.a) + u.rgb : lerp(g.rgb, u.rgb, u.a);
++    outp[id.xy] = float4(c, 1.0);
++}
++"#;
++
++struct Pass {
++    root: ID3D12RootSignature,
++    pso: ID3D12PipelineState,
++    views: ID3D12DescriptorHeap,
++    cpu: usize,
++    gpu: u64,
++    step: u32,
++    next: u32,
++    /// The texture shown instead, by size.
++    out: Option<(u64, u32, ID3D12Resource)>,
++}
++// SAFETY: D3D12 objects are free-threaded; the pass is used under a lock.
++unsafe impl Send for Pass {}
++
++/// The pass: not tried yet, could not be made, or made.
++static PASS: Mutex<Option<Option<Pass>>> = Mutex::new(None);
++
++fn make(device: &ID3D12Device) -> windows::core::Result<Pass> {
++    let mut code: Option<ID3DBlob> = None;
++    // SAFETY: the source and names live through the call; the out pointer
++    // is ours.
++    unsafe {
++        D3DCompile(
++            SOURCE.as_ptr().cast(),
++            SOURCE.len(),
++            windows::core::s!("present planes"),
++            None,
++            None,
++            windows::core::s!("main"),
++            windows::core::s!("cs_5_1"),
++            0,
++            0,
++            &mut code,
++            None,
++        )?;
++    }
++    let code = code.ok_or_else(windows::core::Error::empty)?;
++    // SAFETY: the blob's own bytes (the root signature is inside the
++    // shader); plain object creation and queries.
++    unsafe {
++        let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
++        let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
++        let pso: ID3D12PipelineState = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
++            pRootSignature: std::mem::transmute_copy(&root),
++            CS: D3D12_SHADER_BYTECODE {
++                pShaderBytecode: bytes.as_ptr().cast(),
++                BytecodeLength: bytes.len(),
++            },
++            ..Default::default()
++        })?;
++        let kind = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
++        let views: ID3D12DescriptorHeap = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
++            Type: kind,
++            NumDescriptors: SLOTS * 3,
++            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
++            NodeMask: 0,
++        })?;
++        Ok(Pass {
++            cpu: views.GetCPUDescriptorHandleForHeapStart().ptr,
++            gpu: views.GetGPUDescriptorHandleForHeapStart().ptr,
++            step: device.GetDescriptorHandleIncrementSize(kind),
++            root,
++            pso,
++            views,
++            next: 0,
++            out: None,
++        })
++    }
++}
++
++/// Whether a host texture's format is one this pass reads and writes
++/// (8-bit RGBA, typeless or not).
++fn rgba8(format: DXGI_FORMAT) -> bool {
++    matches!(format.0, 27 | 28)
++}
++
++fn premultiplied() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("VICTORY_PLANE_PREMULTIPLIED").is_some_and(|v| v == "1"))
++}
++
++/// Records, into the present's `list`, `ui` laid over `game` into a
++/// texture of ours, and gives that texture, left in the copy-source
++/// state. `game` is in the copy-source state (the present put it there);
++/// `ui` is in `ui_state` and is left in it. `None` (nothing recorded) if
++/// a format is not 8-bit RGBA or the pass could not be made.
++pub(crate) fn record(
++    device: &ID3D12Device,
++    list: &ID3D12GraphicsCommandList,
++    game: &ID3D12Resource,
++    ui: &ID3D12Resource,
++    ui_state: u32,
++) -> Option<ID3D12Resource> {
++    // SAFETY: live resources; plain queries.
++    let (gd, ud) = unsafe { (game.GetDesc(), ui.GetDesc()) };
++    if !rgba8(gd.Format) || !rgba8(ud.Format) {
++        static ONCE: std::sync::Once = std::sync::Once::new();
++        ONCE.call_once(|| {
++            tracing::warn!(game = gd.Format.0, ui = ud.Format.0, "present planes not laid over each other: a format this pass does not read");
++        });
++        return None;
++    }
++    let mut kept = PASS.lock().unwrap_or_else(|e| e.into_inner());
++    if kept.is_none() {
++        *kept = Some(match make(device) {
++            Ok(p) => {
++                tracing::info!(premultiplied = premultiplied(), "present planes: the interface is laid over the game");
++                Some(p)
++            }
++            Err(e) => {
++                tracing::warn!(error = %e, "present planes: the pass that lays them over each other could not be made");
++                None
++            }
++        });
++    }
++    let pass = kept.as_mut()?.as_mut()?;
++    let (w, h) = (gd.Width, gd.Height);
++    if pass.out.as_ref().is_none_or(|o| (o.0, o.1) != (w, h)) {
++        let heap = D3D12_HEAP_PROPERTIES {
++            Type: D3D12_HEAP_TYPE_DEFAULT,
++            ..Default::default()
++        };
++        let desc = D3D12_RESOURCE_DESC {
++            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
++            Width: w,
++            Height: h,
++            DepthOrArraySize: 1,
++            MipLevels: 1,
++            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
++            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
++            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
++            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
++            ..Default::default()
++        };
++        let mut out: Option<ID3D12Resource> = None;
++        // SAFETY: plain creation of a device-local texture.
++        unsafe {
++            device
++                .CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_SOURCE, None, &mut out)
++                .ok()?;
++        }
++        pass.out = Some((w, h, out?));
++    }
++    let out = pass.out.as_ref()?.2.clone();
++    let first = (pass.next % SLOTS) * 3;
++    pass.next = pass.next.wrapping_add(1);
++    let cpu = |i: u32| D3D12_CPU_DESCRIPTOR_HANDLE { ptr: pass.cpu + ((first + i) * pass.step) as usize };
++    let gpu = D3D12_GPU_DESCRIPTOR_HANDLE { ptr: pass.gpu + u64::from(first * pass.step) };
++    let srv = D3D12_SHADER_RESOURCE_VIEW_DESC {
++        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
++        ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
++        Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
++        Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
++            Texture2D: D3D12_TEX2D_SRV {
++                MostDetailedMip: 0,
++                MipLevels: 1,
++                ..Default::default()
++            },
++        },
++    };
++    let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
++        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
++        ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
++        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
++            Texture2D: D3D12_TEX2D_UAV { MipSlice: 0, PlaneSlice: 0 },
++        },
++    };
++    let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++    let ui_state = D3D12_RESOURCE_STATES(ui_state as i32);
++    let t = crate::host::transition;
++    let mut before = vec![
++        t(game, D3D12_RESOURCE_STATE_COPY_SOURCE, read),
++        t(&out, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
++    ];
++    let mut after = vec![
++        t(game, read, D3D12_RESOURCE_STATE_COPY_SOURCE),
++        t(&out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
++    ];
++    if ui_state != read {
++        before.push(t(ui, ui_state, read));
++        after.push(t(ui, read, ui_state));
++    }
++    let constants: [u32; 3] = [w as u32, h, u32::from(premultiplied())];
++    // SAFETY: an open list (the present's); slots of our heap; live
++    // resources and objects (the pass's own live as long as the process,
++    // the texture is kept by the present's list).
++    unsafe {
++        device.CreateShaderResourceView(game, Some(&srv), cpu(0));
++        device.CreateShaderResourceView(ui, Some(&srv), cpu(1));
++        device.CreateUnorderedAccessView(&out, None::<&ID3D12Resource>, Some(&uav), cpu(2));
++        list.ResourceBarrier(&before);
++        list.SetDescriptorHeaps(&[Some(pass.views.clone())]);
++        list.SetComputeRootSignature(&pass.root);
++        list.SetPipelineState(&pass.pso);
++        list.SetComputeRoot32BitConstants(0, 3, constants.as_ptr().cast(), 0);
++        list.SetComputeRootDescriptorTable(1, gpu);
++        list.Dispatch((w as u32).div_ceil(8), h.div_ceil(8), 1);
++        list.ResourceBarrier(&after);
++    }
++    Some(out)
++}
+diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
+index 4e2cde0..1881b7b 100644
+--- a/crates/victory-gpu/src/host.rs
++++ b/crates/victory-gpu/src/host.rs
+@@ -8959,11 +8959,29 @@ impl Host {
+     /// as frame `frame` (saved if captures are on). `None` if nothing was
+     /// shown; else, in diagnostics builds, whether the frame was black.
+     pub(crate) fn present(&self, texture: &ID3D12Resource, state: u32, frame: u64) -> Option<bool> {
++        self.present_over(texture, state, None, frame)
++    }
++
++    /// LOCAL (port of fxceless #1189): [`Self::present`], with a second
++    /// plane laid over `texture` if there is one (`crate::compose`): its
++    /// texture and its state, which it is left in.
++    pub(crate) fn present_over(
++        &self,
++        texture: &ID3D12Resource,
++        state: u32,
++        over: Option<(&ID3D12Resource, u32)>,
++        frame: u64,
++    ) -> Option<bool> {
+         // SAFETY: a live resource.
+         let desc = unsafe { texture.GetDesc() };
+-        let Some(format) = swap_format(desc.Format) else {
+-            tracing::warn!(format = desc.Format.0, "cannot present this format");
+-            return None;
++        let format = if over.is_some() {
++            DXGI_FORMAT_R8G8B8A8_UNORM
++        } else {
++            let Some(format) = swap_format(desc.Format) else {
++                tracing::warn!(format = desc.Format.0, "cannot present this format");
++                return None;
++            };
++            format
+         };
+         let (width, height) = (desc.Width as u32, desc.Height);
+         let mut presenter = self.presenter.lock().unwrap_or_else(|e| e.into_inner());
+@@ -9042,7 +9060,13 @@ impl Host {
+                     D3D12_RESOURCE_STATE_COPY_DEST,
+                 ),
+             ]);
+-            list.CopyResource(&back, texture);
++            // LOCAL (port of fxceless #1189): the second plane laid over the
++            // first, into a texture of ours shown instead (`crate::compose`).
++            let laid = over.and_then(|(ui, ui_state)| crate::compose::record(&self.device, list, texture, ui, ui_state));
++            if let Some(laid) = &laid {
++                copy.keep(laid);
++            }
++            list.CopyResource(&back, laid.as_ref().unwrap_or(texture));
+             #[cfg(feature = "diagnostics")]
+             let capture = crate::capture::wanted(frame)
+                 .then(|| crate::capture::read_back(&self.device, list, texture))
+diff --git a/crates/victory-gpu/src/lib.rs b/crates/victory-gpu/src/lib.rs
+index 663f027..2d86ae6 100644
+--- a/crates/victory-gpu/src/lib.rs
++++ b/crates/victory-gpu/src/lib.rs
+@@ -19,6 +19,8 @@
+ mod ambient;
+ #[cfg(all(windows, feature = "diagnostics"))]
+ mod capture;
++// LOCAL (port of fxceless #1189): Series S interface plane laid over the game (VICTORY_COMPOSE=1).
++mod compose;
+ pub mod console;
+ #[cfg(all(windows, feature = "diagnostics"))]
+ mod copystat;
+diff --git a/crates/victory-gpu/src/queue.rs b/crates/victory-gpu/src/queue.rs
+index 2784f12..104bc63 100644
+--- a/crates/victory-gpu/src/queue.rs
++++ b/crates/victory-gpu/src/queue.rs
+@@ -949,7 +949,10 @@ extern "system" fn present(
+             None
+         };
+         let resource = texture.as_ref().map_or(0, |t| t.0);
+-        behind::present(this, texture.map(|(_, copy, state)| (copy, state)), Shown { frame, resource });
++        // LOCAL (port of fxceless #1189): the interface plane, as the first.
++        let over = second_plane(planes, plane_parameters, resource as This)
++            .map(|(copy, state)| (copy, if crate::list::thin::wanted() { u32::MAX } else { state }));
++        behind::present(this, texture.map(|(_, copy, state)| (copy, state)), Shown { frame, resource, over });
+         called.end();
+         #[cfg(feature = "diagnostics")]
+         frame_ends();
+@@ -969,7 +972,8 @@ extern "system" fn present(
+         const COPY_SOURCE: u32 = 0x800;
+         let state = crate::resource::host_transition(resource, COPY_SOURCE)
+             .map_or(COPY_SOURCE, |(_, before)| before);
+-        show(texture, state, Shown { frame, resource: resource as usize });
++        let over = second_plane(planes, plane_parameters, resource);
++        show(texture, state, Shown { frame, resource: resource as usize, over });
+         crate::resource::host_transition(resource, state);
+         let _ = host;
+     }
+@@ -1001,10 +1005,54 @@ fn frame_ends() {
+ 
+ /// The frame a present shows, and the title's resource it shows.
+ #[cfg(windows)]
+-#[derive(Clone, Copy)]
++#[derive(Clone)]
+ struct Shown {
+     frame: u64,
+     resource: usize,
++    /// LOCAL (port of fxceless #1189): the second plane to lay over the
++    /// shown one, and its host state (`u32::MAX`: the state its lists left
++    /// it in when they ran).
++    over: Option<(std::sync::Arc<crate::resource::HostTexture>, u32)>,
++}
++
++/// LOCAL (port of fxceless #1189): a present's second plane, to be laid over
++/// the first (`crate::compose`), with `VICTORY_COMPOSE=1`. Its host copy and
++/// the host state the lists recorded so far leave it in.
++/// A Series S title presents two planes: the game and the interface
++/// (menus, loading screens, the intro), 72-byte descriptions each.
++#[cfg(windows)]
++fn second_plane(
++    planes: u32,
++    plane_parameters: *const Plane,
++    first: This,
++) -> Option<(std::sync::Arc<crate::resource::HostTexture>, u32)> {
++    const STRIDE: usize = 72;
++    const COPY_SOURCE: u32 = 0x800;
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    let on = *ON.get_or_init(|| {
++        let on = std::env::var_os("VICTORY_COMPOSE").is_some_and(|v| v == "1");
++        if on {
++            tracing::warn!("LOCAL present planes: a second plane is laid over the first (VICTORY_COMPOSE=1)");
++        }
++        on
++    });
++    if !on || planes < 2 || plane_parameters.is_null() {
++        return None;
++    }
++    // SAFETY: the title passes `planes` descriptions of `STRIDE` bytes.
++    let plane = unsafe { plane_parameters.cast::<u8>().add(STRIDE).cast::<Plane>().as_ref() }?;
++    if plane.count == 0 || plane.resources.is_null() {
++        return None;
++    }
++    // SAFETY: the plane lists `count` resources.
++    let resource = unsafe { *plane.resources };
++    if resource == first {
++        return None;
++    }
++    let copy = crate::resource::host_copy(resource)?;
++    let state = crate::resource::host_transition(resource, COPY_SOURCE).map_or(COPY_SOURCE, |(_, before)| before);
++    crate::resource::host_transition(resource, state);
++    Some((copy, state))
+ }
+ 
+ /// Shows `texture`, in host state `state`, in our window.
+@@ -1013,7 +1061,11 @@ fn show(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource, state: u
+     let Some(host) = crate::host::host() else {
+         return;
+     };
+-    let shown = host.present(texture, state, what.frame);
++    let over = what.over.as_ref().map(|(t, s)| {
++        let s = if *s == u32::MAX { t.state.load(Ordering::Relaxed) } else { *s };
++        (&t.texture, s)
++    });
++    let shown = host.present_over(texture, state, over, what.frame);
+     #[cfg(feature = "diagnostics")]
+     blinks(what.frame, what.resource as This, state, shown);
+     #[cfg(not(feature = "diagnostics"))]
+diff --git a/crates/victory-hle/Cargo.toml b/crates/victory-hle/Cargo.toml
+index d91f14f..0a69ef8 100644
+--- a/crates/victory-hle/Cargo.toml
++++ b/crates/victory-hle/Cargo.toml
+@@ -12,6 +12,7 @@ victory-gpu.workspace = true
+ victory-loader.workspace = true
+ victory-pe.workspace = true
+ victory-formats.workspace = true
++blake3.workspace = true
+ opus-pure.workspace = true
+ zlib-rs.workspace = true
+ tracing.workspace = true
+diff --git a/crates/victory-hle/src/modules/dstorage.rs b/crates/victory-hle/src/modules/dstorage.rs
+index a44d599..b518419 100644
+--- a/crates/victory-hle/src/modules/dstorage.rs
++++ b/crates/victory-hle/src/modules/dstorage.rs
+@@ -1409,9 +1409,8 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
+         source
+     };
+     into_destination(request, size, |out| match tables {
+-        Some(tables) => bcpack::decode(bc, &source, out, tables)
+-            .map(|()| out.len())
+-            .map_err(|e| fail(INVALID_DATA, &e.to_string())),
++        Some(tables) => bcpack_decode_cached(bc, &source, out, tables)
++            .map_err(|hr| fail(hr, "bcpack")),
+         None => inflate(&source, out).map_err(|hr| fail(hr, "zlib")),
+     })?;
+     tracing::trace!(
+@@ -1423,6 +1422,109 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
+     Ok(())
+ }
+ 
++/// Unpacks a BCPack stream, from the decoded-chunk cache when the same
++/// stream was unpacked before.
++///
++/// The console's decompression block unpacks BCPack off the processor; the
++/// software decoder here runs at 20 to 48 MB/s, and 60 to 85% of that is the
++/// entropy stage. A chunk once decoded is the same bytes every time the title
++/// asks for it (every launch, every revisit), so keeping the result costs disk
++/// and saves the whole decode.
++///
++/// Keyed by the format, the destination length and the packed bytes (blake3,
++/// first 32 hex digits). `VICTORY_BCPACK_CACHE=0` turns it off;
++/// `VICTORY_BCPACK_CACHE_DIR` names the folder (default: `bcpack` under the
++/// cache directory). Writes are atomic (temporary file, then rename), and a
++/// failed write is only a lost optimisation.
++fn bcpack_decode_cached(
++    bc: u8,
++    source: &[u8],
++    out: &mut [u8],
++    tables: &Tables,
++) -> Result<usize, HRESULT> {
++    static ON: OnceLock<bool> = OnceLock::new();
++    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_BCPACK_CACHE").is_none_or(|v| v != "0"));
++    let dir = if on { bcpack_cache_dir() } else { None };
++    let Some(dir) = dir else {
++        return decode_bcpack(bc, source, out, tables);
++    };
++    let mut hasher = blake3::Hasher::new();
++    hasher.update(&[bc]);
++    hasher.update(&(out.len() as u64).to_le_bytes());
++    hasher.update(source);
++    let hex = hasher.finalize().to_hex();
++    let path = dir.join(format!("{}.bc{bc}", &hex[..32]));
++    if let Ok(bytes) = std::fs::read(&path)
++        && bytes.len() == out.len()
++    {
++        out.copy_from_slice(&bytes);
++        return Ok(out.len());
++    }
++    decode_bcpack(bc, source, out, tables)?;
++    write_bcpack_cache(&dir, &path, out);
++    Ok(out.len())
++}
++
++/// The folder decoded BCPack chunks live in, made on first use.
++fn bcpack_cache_dir() -> Option<std::path::PathBuf> {
++    let dir = match std::env::var_os("VICTORY_BCPACK_CACHE_DIR") {
++        Some(p) => std::path::PathBuf::from(p),
++        None => {
++            let base = match std::env::var_os("VICTORY_CACHE_DIR") {
++                Some(p) => std::path::PathBuf::from(p),
++                None => std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
++                    .join("victory")
++                    .join("cache"),
++            };
++            base.join("bcpack")
++        }
++    };
++    match std::fs::create_dir_all(&dir) {
++        Ok(()) => Some(dir),
++        Err(e) => {
++            tracing::warn!(dir = %dir.display(), error = %e, "bcpack: no cache folder");
++            None
++        }
++    }
++}
++
++/// Writes a decoded chunk to `path` through a temporary file, so a reader
++/// never sees half of it; two workers decoding the same stream race harmlessly
++/// (the second rename may fail, and the bytes are the same).
++fn write_bcpack_cache(dir: &std::path::Path, path: &std::path::Path, bytes: &[u8]) {
++    use std::io::Write as _;
++    static COUNT: AtomicU64 = AtomicU64::new(0);
++    let n = COUNT.fetch_add(1, Ordering::Relaxed);
++    let temp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
++    let written = std::fs::File::create(&temp).and_then(|mut f| {
++        f.write_all(bytes)?;
++        f.sync_all()
++    });
++    if written.is_err() {
++        let _ = std::fs::remove_file(&temp);
++        return;
++    }
++    if std::fs::rename(&temp, path).is_err() {
++        let _ = std::fs::remove_file(&temp);
++    }
++}
++
++/// The decoder itself, for a chunk the cache does not hold.
++fn decode_bcpack(
++    bc: u8,
++    source: &[u8],
++    out: &mut [u8],
++    tables: &Tables,
++) -> Result<usize, HRESULT> {
++    match bcpack::decode(bc, source, out, tables) {
++        Ok(()) => Ok(out.len()),
++        Err(e) => {
++            tracing::warn!(bc, error = %e, "dstorage: BCPack stream does not decode");
++            Err(INVALID_DATA)
++        }
++    }
++}
++
+ /// Inflates a zlib stream into `out`, returning the bytes written. A stream
+ /// that ends short of `out` passes: the title's chunks fill it exactly, and
+ /// nothing says that is required.
+diff --git a/crates/victory-loader/src/hooks.rs b/crates/victory-loader/src/hooks.rs
+new file mode 100644
+index 0000000..96fa540
+--- /dev/null
++++ b/crates/victory-loader/src/hooks.rs
+@@ -0,0 +1,258 @@
++//! Opt-in compatibility hooks for known title builds.
++//!
++//! LOCAL: copied from vitutu1/victory-perf crates/victory-loader/src/hooks.rs, which ported it from
++//! ZigZagBoi1/ScarlettPort (`runtime/victory`, GPL-3.0-or-later).
++//! Only per-build offsets and short byte signatures live here (asset policy:
++//! nothing of the title itself). Every hook checks the build's hash and the
++//! exact bytes it replaces, and does nothing otherwise.
++
++use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
++use windows_sys::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, VirtualProtect};
++use windows_sys::Win32::System::Threading::GetCurrentProcess;
++
++/// First 16 hex digits of the BLAKE3 of the Series X 1.0.2.1 executable.
++const BUILD_1_0_2_1: &str = "b99f876b74d4a77f";
++
++/// Environment variable that turns the watchdog hook on.
++pub(crate) const NO_WATCHDOG_ENV: &str = "VICTORY_NO_WATCHDOG";
++
++/// One code patch: `rva` must hold exactly `expect` before `new` is written.
++struct Patch<'a> {
++    what: &'static str,
++    rva: usize,
++    expect: &'a [u8],
++    new: &'a [u8],
++}
++
++/// The title's watchdog thread ends the process on purpose when its main
++/// thread has not advanced for about 30 one-second ticks. Two places do it:
++/// the handler it calls (`mov dword ptr [0], imm32`) and, when the handler
++/// returns or is unset, a fallback right after the call (`mov dword ptr [0],
++/// 0; int3`). Jumping over the whole block returns the loop to its normal
++/// path; the first patch makes the handler harmless if something else calls it.
++const WATCHDOG: &[Patch<'static>] = &[
++    Patch {
++        what: "watchdog: skip the call and the fallback fault",
++        rva: 0x2215c27,
++        // mov rax, [rip + disp32] (the handler pointer)
++        expect: &[0x48, 0x8B, 0x05, 0x1A, 0x07, 0xFA, 0x04],
++        // jmp +0x18 (to the loop's normal continuation), then NOPs
++        new: &[0xEB, 0x18, 0x90, 0x90, 0x90, 0x90, 0x90],
++    },
++    Patch {
++        what: "watchdog: handler's deliberate fault",
++        rva: 0x23cf683,
++        expect: &[0xC7, 0x04, 0x25, 0, 0, 0, 0, 0x21, 0xD4, 0x8B, 0x4D],
++        // an eleven-byte NOP
++        new: &[0x66, 0x66, 0x2E, 0x0F, 0x1F, 0x84, 0, 0, 0, 0, 0],
++    },
++];
++
++/// Applies the watchdog patches whose bytes match. Returns how many applied.
++///
++/// # Safety
++/// `base` is the mapped image whose original BLAKE3 is `hash`, and no title
++/// code is running yet.
++pub(crate) unsafe fn disarm_watchdog(base: usize, hash: &blake3::Hash) -> usize {
++    if !hash.to_hex().starts_with(BUILD_1_0_2_1) {
++        return 0;
++    }
++    WATCHDOG
++        .iter()
++        // SAFETY: forwarded from this function's contract.
++        .filter(|p| unsafe { apply(base, p) })
++        .count()
++}
++
++/// Environment variable that pins the title's internal render scale
++/// (`0.2..=1.0` of the output size). Testing lever, off by default.
++pub(crate) const RENDER_SCALE_ENV: &str = "VICTORY_RENDER_SCALE";
++/// Environment variable that makes the title use its own temporal upscaler
++/// on every console profile (Series S otherwise picks FSR).
++pub(crate) const OWN_UPSCALER_ENV: &str = "VICTORY_OWN_UPSCALER";
++
++/// A patch whose bytes are computed at load time.
++struct OwnedPatch {
++    what: &'static str,
++    rva: usize,
++    expect: Vec<u8>,
++    new: Vec<u8>,
++}
++
++/// The upscaler choice: `mov eax, 6` (own upscaler) then `cmovne eax, ecx`
++/// (FSR when the profile asks for it). NOPing the cmovne keeps 6.
++const OWN_UPSCALER: Patch<'static> = Patch {
++    what: "upscaler: always the title's own",
++    rva: 0x7e9426,
++    expect: &[0x0F, 0x45, 0xC1],
++    new: &[0x0F, 0x1F, 0x00],
++};
++
++/// Read-only float constants of this build usable as the FSR scale:
++/// value, RVA.
++const FSR_SCALES: [(f32, usize); 4] = [
++    (0.5, 0x5fc6edc),
++    (0.4, 0x5fc6f90),
++    (1.0 / 3.0, 0x615a240),
++    (0.75, 0x6159b04),
++];
++
++/// The render-scale patches for `scale`, with the image at `base`:
++/// - the own upscaler's minimum scale (an immediate, 2/3 by default) set to
++///   `scale` and its maximum made equal to the minimum (`vmaxss` → `vmovss`),
++///   so the scale is fixed;
++/// - FSR's scale (a load of 2/3 on Series S) pointed at a constant equal to
++///   `scale`, when this build has one, and its maximum size made the scaled
++///   size (vtable slot 11 → slot 10's function).
++fn render_scale_patches(base: usize, scale: f32, fsr: bool) -> Vec<OwnedPatch> {
++    let mut patches = vec![
++        OwnedPatch {
++            what: "render scale: own upscaler minimum",
++            rva: 0x28f1e7e,
++            expect: vec![0xAB, 0xAA, 0x2A, 0x3F],
++            new: scale.to_le_bytes().to_vec(),
++        },
++        OwnedPatch {
++            what: "render scale: own upscaler maximum = minimum",
++            rva: 0x28f1e87,
++            expect: vec![0xC5, 0xFA, 0x5F, 0x86, 0x90, 0, 0, 0],
++            new: vec![0xC5, 0xFA, 0x10, 0x86, 0x90, 0, 0, 0],
++        },
++    ];
++    if !fsr {
++        return patches;
++    }
++    match FSR_SCALES.iter().find(|(v, _)| (v - scale).abs() < 1e-3) {
++        Some(&(_, constant)) => {
++            // vmovss xmm0, [rip + disp32]; the next instruction is at +8.
++            const LOAD: usize = 0x28ef6b2;
++            let disp = (constant as i64 - (LOAD as i64 + 8)) as i32;
++            let mut new = vec![0xC5, 0xFA, 0x10, 0x05];
++            new.extend_from_slice(&disp.to_le_bytes());
++            patches.push(OwnedPatch {
++                what: "render scale: FSR scale",
++                rva: LOAD,
++                expect: vec![0xC5, 0xFA, 0x10, 0x05, 0xA2, 0xE2, 0x86, 0x03],
++                new,
++            });
++            patches.push(OwnedPatch {
++                what: "render scale: FSR maximum = scaled size",
++                rva: 0x6300ba8,
++                expect: ((base + 0x28ef6f0) as u64).to_le_bytes().to_vec(),
++                new: ((base + 0x28ef680) as u64).to_le_bytes().to_vec(),
++            });
++        }
++        None => tracing::warn!(
++            scale,
++            "no FSR constant for this scale (0.5, 0.4, 1/3, 0.75); FSR keeps its own (use {OWN_UPSCALER_ENV}=1)"
++        ),
++    }
++    patches
++}
++
++/// The scale `VICTORY_RENDER_SCALE` asks for, if valid.
++fn parse_scale(text: &str) -> Option<f32> {
++    let v: f32 = text.trim().parse().ok()?;
++    (0.2..=1.0).contains(&v).then_some(v)
++}
++
++/// Applies the resolution levers asked for in the environment
++/// ([`RENDER_SCALE_ENV`], [`OWN_UPSCALER_ENV`]). Returns how many applied.
++///
++/// # Safety
++/// As `disarm_watchdog`.
++pub(crate) unsafe fn resolution_levers(base: usize, hash: &blake3::Hash) -> usize {
++    let scale = std::env::var(RENDER_SCALE_ENV).ok();
++    let own = std::env::var_os(OWN_UPSCALER_ENV).is_some_and(|v| v != "0");
++    if scale.is_none() && !own {
++        return 0;
++    }
++    // Every image the loader maps comes here (the title's DLLs too); only
++    // the 1.0.2.1 executable has the patched places.
++    if !hash.to_hex().starts_with(BUILD_1_0_2_1) {
++        tracing::debug!("resolution levers: not the 1.0.2.1 executable; nothing patched");
++        return 0;
++    }
++    let mut applied = 0;
++    if own {
++        // SAFETY: forwarded from this function's contract.
++        applied += usize::from(unsafe { apply(base, &OWN_UPSCALER) });
++    }
++    if let Some(text) = scale {
++        match parse_scale(&text) {
++            Some(scale) => {
++                // With the own upscaler forced, FSR is left as it is.
++                for p in render_scale_patches(base, scale, !own) {
++                    let p = Patch {
++                        what: p.what,
++                        rva: p.rva,
++                        expect: &p.expect,
++                        new: &p.new,
++                    };
++                    // SAFETY: forwarded from this function's contract.
++                    applied += usize::from(unsafe { apply(base, &p) });
++                }
++            }
++            None => tracing::warn!(text, "{RENDER_SCALE_ENV} wants a number in 0.2..=1.0"),
++        }
++    }
++    applied
++}
++
++/// # Safety
++/// See `disarm_watchdog`.
++unsafe fn apply(base: usize, p: &Patch<'_>) -> bool {
++    let at = (base + p.rva) as *mut u8;
++    // SAFETY: the offset is inside the mapped .text of this exact build.
++    let now = unsafe { std::slice::from_raw_parts(at, p.expect.len()) };
++    if now != p.expect || p.new.len() != p.expect.len() {
++        tracing::warn!(what = p.what, "hook skipped: the bytes are not the expected ones");
++        return false;
++    }
++    let mut old = 0;
++    // SAFETY: changing the protection of those bytes only, restored below.
++    if unsafe { VirtualProtect(at as _, p.new.len(), PAGE_EXECUTE_READWRITE, &mut old) } == 0 {
++        return false;
++    }
++    // SAFETY: writable now; the bytes are the ones checked above.
++    unsafe {
++        std::ptr::copy_nonoverlapping(p.new.as_ptr(), at, p.new.len());
++        VirtualProtect(at as _, p.new.len(), old, &mut old);
++        FlushInstructionCache(GetCurrentProcess(), at as _, p.new.len());
++    }
++    tracing::info!(what = p.what, "hook applied");
++    true
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn scales_outside_the_floor_are_refused() {
++        assert_eq!(parse_scale("0.5"), Some(0.5));
++        assert_eq!(parse_scale(" 1 "), Some(1.0));
++        assert_eq!(parse_scale("0.1"), None);
++        assert_eq!(parse_scale("1.5"), None);
++        assert_eq!(parse_scale("half"), None);
++    }
++
++    #[test]
++    fn half_scale_patches_both_upscalers() {
++        let base = 0x7ff0_0000_0000;
++        let p = render_scale_patches(base, 0.5, true);
++        assert_eq!(p.len(), 4);
++        assert_eq!(p[0].new, 0.5f32.to_le_bytes());
++        // The FSR load now reads 0.5 at 0x5fc6edc: disp from the next instruction.
++        assert_eq!(p[2].new, [0xC5, 0xFA, 0x10, 0x05, 0x22, 0x78, 0x6D, 0x03]);
++        assert_eq!(p[3].new, ((base + 0x28ef680) as u64).to_le_bytes());
++        assert!(p.iter().all(|p| p.new.len() == p.expect.len()));
++    }
++
++    #[test]
++    fn odd_scales_patch_only_the_own_upscaler() {
++        assert_eq!(render_scale_patches(0, 0.6, true).len(), 2);
++        assert_eq!(render_scale_patches(0, 0.5, false).len(), 2);
++    }
++}
++
+diff --git a/crates/victory-loader/src/lib.rs b/crates/victory-loader/src/lib.rs
+index c14ab12..5f11d6c 100644
+--- a/crates/victory-loader/src/lib.rs
++++ b/crates/victory-loader/src/lib.rs
+@@ -24,6 +24,9 @@
+ #[cfg(windows)]
+ mod console_insn;
+ mod crash;
++// LOCAL (victory-perf, via our wt5): VICTORY_RENDER_SCALE / VICTORY_OWN_UPSCALER / VICTORY_NO_WATCHDOG title patches.
++#[cfg(windows)]
++mod hooks;
+ #[cfg(windows)]
+ pub mod descriptor_sites;
+ pub mod prepare;
+diff --git a/crates/victory-loader/src/windows.rs b/crates/victory-loader/src/windows.rs
+index a0375ef..0a2897a 100644
+--- a/crates/victory-loader/src/windows.rs
++++ b/crates/victory-loader/src/windows.rs
+@@ -84,6 +84,22 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
+         // SAFETY: just mapped, and no title code has run.
+         unsafe { crate::tls::redirect(loaded.base(), &loaded.info) }?;
+     }
++    // LOCAL (victory-perf, via our wt5): opt-in title patches, each checked against the 1.0.2.1 hash and its bytes.
++    if std::env::var_os(crate::hooks::NO_WATCHDOG_ENV).is_some() {
++        // SAFETY: just mapped, and no title code has run.
++        let applied = unsafe { crate::hooks::disarm_watchdog(loaded.base(), &prepared.original_hash) };
++        tracing::info!(applied, "title watchdog hooks ({})", crate::hooks::NO_WATCHDOG_ENV);
++    }
++    // SAFETY: just mapped, and no title code has run.
++    let levers = unsafe { crate::hooks::resolution_levers(loaded.base(), &prepared.original_hash) };
++    if levers > 0 {
++        tracing::warn!(
++            applied = levers,
++            "title resolution levers ({}, {})",
++            crate::hooks::RENDER_SCALE_ENV,
++            crate::hooks::OWN_UPSCALER_ENV
++        );
++    }
+     tracing::info!(
+         base = format_args!("{:#x}", loaded.base()),
+         preferred = format_args!("{:#x}", loaded.info.image_base),
+diff --git a/scripts/play-nvidia.ps1 b/scripts/play-nvidia.ps1
+new file mode 100644
+index 0000000..277b845
+--- /dev/null
++++ b/scripts/play-nvidia.ps1
+@@ -0,0 +1,107 @@
++# Starts the title on an NVIDIA card with the Series S settings measured on an RTX 5070 (about 18-22 fps, no device loss).
++#   scripts\play-nvidia.ps1 -Exe <path of your own copy's executable>
++# -NoSmoothMotion  run target\<build>\victory.exe itself. By default a copy named victory_sm.exe is started instead,
++#                  so a Smooth Motion profile set for that exe in the NVIDIA App applies every time.
++# -SeriesX         the Series X profile instead (slower: about 7 fps at half scale)
++# -Quality         fewer stretched/jumping bodies and less rainbow skin, at about 13 fps instead of about 20
++# -RayTracing      keep the title's ray-tracing passes (off by default: see below)
++# -Resolution      the height the game renders at before the title's own upscaler: 2160, 1440, 1080, 720, 540 or 480.
++#                  Series S outputs 1080p (so up to 1080 there), Series X 2160p. Default: half the output (540 on S,
++#                  1080 on X). The play-S-*.ps1 and play-X-*.ps1 scripts next to this one call it with each.
++# -Adapter         on a PC with more than one card, the one to use: part of its name (-Adapter 5060) or its index
++#                  (-Adapter '#1'). Default: Windows' default card (the one the main display is on).
++# -Build           target\diag (the default, the build all measurements are of) or target\release
++#                  (the release build ignores the ray-tracing skip list: VICTORY_SKIP_PIPELINES is a diagnostics switch)
++# -More            other settings: -More @{VICTORY_PANEL='1'}
++# Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
++param(
++    [Parameter(Mandatory)][string]$Exe,
++    [switch]$NoSmoothMotion,
++    [switch]$SeriesX,
++    [switch]$Quality,
++    [switch]$RayTracing,
++    [ValidateSet('2160', '1440', '1080', '720', '540', '480')][string]$Resolution,
++    [string]$Adapter,
++    [ValidateSet('diag', 'release')][string]$Build = 'diag',
++    [hashtable]$More = @{}
++)
++$settings = @{
++    # This fork's play set (scripts\play.ps1, not -Safe): the speed set.
++    VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_CARD_STEPS = '2'
++    VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
++    VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'
++    VICTORY_INDIRECT_BATCH = '2'; VICTORY_MAP_THREADS = '1'; VICTORY_TITLE_PRIORITIES = '0'; VICTORY_CARD_AWAKE = '1'
++    VICTORY_SHOW_AFTER = '1'; VICTORY_AMBIENT = '0.8'; VICTORY_D3D12_DRED = 'light'; VICTORY_SKIP_PIPELINES = 'none'
++    VICTORY_THIN = '1'; VICTORY_JOIN_PARTS = '8'; VICTORY_UPLOAD_AHEAD = '1'
++    # Cheap picture fixes, on in both sets:
++    # - Overbright views: without rays the light probes keep the sky's light indoors. The fog is bounded by 1.5 times
++    #   the light around, and what the title left by 2 times the estimate (was 4; ambient.rs).
++    VICTORY_AMBIENT_AIR = '1.5'; VICTORY_AMBIENT_MOST = '2'
++    # - Black blobs: a NaN a shader writes is made 0 before blur and the temporal upscaler spread it (emit/lower.rs).
++    VICTORY_NAN_SCRUB = '1'
++    # Wait for new shaders rather than skip their draws (a hitch the first time a place is seen). Each pipeline is
++    # waited for at most once (VICTORY_PIPELINE_WAIT_ONCE, on by default): one that takes longer no longer stops the
++    # picture in every frame it is in view (pipeline/make.rs).
++    VICTORY_PIPELINE_WAIT_MS = '10000'
++    # NVIDIA caps the shader-visible view heap at 1,000,000: without more dynamic slots thousands of draws a frame
++    # are dropped (descriptor/host.rs dynamic_slots).
++    VICTORY_DYNAMIC_SLOTS = '524288'
++    # Half render scale with the title's own upscaler (Series S needs it with a scale below 1; victory-loader hooks.rs).
++    VICTORY_RENDER_SCALE = '0.5'; VICTORY_OWN_UPSCALER = '1'
++    # Ray walks end at the root while the structure builder is off (emit/intersect.rs).
++    VICTORY_BVH_MISS = '1'
++    # Memory compares on the card instead of the CPU: 11 -> about 22 fps on Series S.
++    VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1536'
++    # Series S presents the interface as a second plane: laid over the game (compose.rs), else black before gameplay.
++    VICTORY_COMPOSE = '1'
++}
++# Ray tracing mostly off. The structure builder cannot run on NVIDIA (its 64-lane programs are refused; upstream
++# Marvisak/VIctory pull request 2311), so every ray misses, and the passes that turn misses into light made rooms go
++# white depending on the view angle. rt_off_hashes.txt lists the 1,000 CS_RaytracingResolve and 34 traced-shadow
++# shaders, which are skipped. The screen-probe and visibility traces keep running: skipping those too left their
++# outputs as garbage (rainbow glitter everywhere).
++$rtList = Join-Path $PSScriptRoot 'rt_off_hashes.txt'
++if (-not $RayTracing -and (Test-Path $rtList)) {
++    $settings.VICTORY_SKIP_PIPELINES = (Get-Content $rtList -Raw).Trim()
++}
++if ($Quality) {
++    # Stretched/jumping bodies: relay stage 1 and no card steps (avatarmanz/VIctory-7900XTX issue 13,
++    # fxceless/victory-fork issue 89). Rainbow skin: texture refreshes wait for the runtime's remapping.
++    # Costs about 7 fps (the submitting thread waits about 30 ms a frame for the card).
++    $settings.VICTORY_RELAY = '1'; $settings.VICTORY_CARD_STEPS = '0'; $settings.VICTORY_TEXTURE_NO_WAIT = '0'
++}
++# The render scale is the rendered height over the output height (Series S 1080, Series X 2160).
++$outHeight = if ($SeriesX) { 2160 } else { 1080 }
++$console = if ($SeriesX) { 'X' } else { 'S' }
++if ($Resolution) {
++    if ([int]$Resolution -gt $outHeight) {
++        Write-Host "Series $console outputs ${outHeight}p: ${Resolution}p is above it."
++        return
++    }
++    $settings.VICTORY_RENDER_SCALE = ([int]$Resolution / $outHeight).ToString('0.####', [Globalization.CultureInfo]::InvariantCulture)
++}
++if ($Adapter) { $settings.VICTORY_ADAPTER = $Adapter }
++foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
++$scale = [double]::Parse($settings.VICTORY_RENDER_SCALE, [Globalization.CultureInfo]::InvariantCulture)
++Write-Host "Series $console, rendering at $([int]($outHeight * $scale))p (render scale $($settings.VICTORY_RENDER_SCALE))"
++
++$victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
++if (-not (Test-Path $victory)) { Write-Host "No $victory. Build it first (README.md)."; return }
++if (-not (Test-Path $Exe)) { Write-Host "No $Exe."; return }
++if (-not $NoSmoothMotion) {
++    # A copy under the name the NVIDIA App's Smooth Motion profile is set for, refreshed when the build changes.
++    $sm = Join-Path (Split-Path $victory) 'victory_sm.exe'
++    if (-not (Test-Path $sm) -or (Get-Item $sm).LastWriteTime -lt (Get-Item $victory).LastWriteTime) {
++        Copy-Item $victory $sm -Force
++    }
++    $victory = $sm
++}
++# (Other settings left over in this window go; where your files are stays.)
++$paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
++Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
++foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
++$Exe = (Resolve-Path $Exe).Path
++$runArgs = @('run', $Exe, '--execute')
++if (-not $SeriesX) { $runArgs += @('--console', 'series-s') }
++Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
++try { & $victory @runArgs } finally { Pop-Location }
+diff --git a/scripts/rt_off_hashes.txt b/scripts/rt_off_hashes.txt
+new file mode 100644
+index 0000000..d2246a6
+--- /dev/null
++++ b/scripts/rt_off_hashes.txt
+@@ -0,0 +1,13 @@
++002f8eb4802deb36,008f3e09ac72b1e0,009411de14bdaf7c,015832d72477fb26,015ccbad26579e10,019bbbc14964fa81,01a0989ded2608aa,01cceb8d45b52bf8,024fc71d30ecf62b,029e551efc53f959,02a4ed10c682ac3a,02af016b81284952,02f7c70b1180ad08,031a0cdf7eea05e4,03c593f1296c249a,03eb4074242a6013,043df98be0270424,04d46e7934e1fe24,04f90cb19f940759,0512c381f84c2ae9,05b939a0705f27ed,05ba183058112919,05d0579c2cacd393,05ef21a2132db12d,06989306fb3b54c2,069933f119b8dc40,071749f385c35640,072f5fe96efd27e1,0753e7f1ebeb1681,075e4d20a54baa28,077869cd9b1456ee,07c6ecf2f7ff4e69,0801d2ce0fa5e5e0,08ef5b2aa4d1f252,08f914eec26d44e7,091c5b9715bf60ca,0926a680fc26dcba,09361790d2954b37,09a142d26deecbba,09b0be1e60364b47,0a12de46c4d5db08,0ab92d33b2800cac,0ac6717164281c2d,0ad5f672524dbdbc,0ae69044bfd15035,0aed4662a44cdf61,0b07d50b76014236,0b3d156291158496,0bb64e3e583c4899,0bcea570530f53d9,0c0120fcb5aac198,0c3f84cfd614b0df,0cdb904653133be0,0d0e7097e89fd890,0e82ddb656aab93d,0e8ba5f65adaded2,0ee452e79fc5b98c,0efa55e3d4952b26,0f0996fee0545c14,0f0defdf30b9ba7d,0f1395e5942ca3b2,0f1ea383d368b3c9,0f5d12d14d22e848,0f6878cf07be69b5,0fbd0340052ebeb6,0fe3c05d0fc8c074,110e0d0bac2f89a9,11bb63dffff08dcc,11d153b2f0b807ee,11f60daa85075500,12277d3fe5b09f57,1261271b20a35d1b,12e375a4a2ddb4eb,12efa84143ac3f9c,12fd000b7df7f35d,1351f0efaa452416,135237a5f20fc8c4,1378934c8174f649,137de2f8a7ef881c,138715fe4ad3f11a,1459863b79e1c6c1,146934cd6e55dac6,1472200ca409949b,149cb3508b989d0e,14d57d8f0cf5f2d8,1512b6b81c4072ed,154b14f2e16015a1,154cad3e8a014898,157d961dc763b8a4,15c8f09950ba2980,164e0145dabd887d,16622000e3a30bf0,168ac102b4088dc9,16e698c250d4e48e,173eb108a2e8ad07,17abf892ce45874a,17e32bc9dbc554e2,1807bb5832825166,18406421ee8b6e8f,185fca8fe0f3c45b,18acf73cb543f66c,19c48e8df2525284,19de2179f549fd39,1a1089a18f7ff5f8,1a72961fb4e91af0,1a83504bcee28c3b,1a919da0e04bb9cc,1b0893dbeea49285,1b20028fc5fae124,1b72691c45556780,1bbf44423a524038,1be5f31a9bf45d93,1bea280ac0b0105d,1c02f8131c508c75,1c13258774db7662,1c268875ec1ae9b3,1c2888d0f2ee3578,1c6050da9b536890,1c6ca57774390d61,1c7d12f61284dde9,1cc4a387e7ab270f,1d495a6ae4665a95,1d85ce5cf0645144,1e05feba773151c1,1e0af7527af3431b,1e1d0a4971e46f74,1e225eb5a582051a,1e4947eada3d9ee3,1f55c45de66dc2c4,1f7d589e25ac7ae7,1f8e2bb1d26f9a53,1ff05fa9d6793947,2006d876c438c7f2,2007e47e566d5ca3,20117840e7be70c8,203f78efece5bbdf,209db98c2610b1f2,20ed134dfe212910,210b038b2c2a6589,2133abe5e36f8449,214d84759c294d11,21925d87ec794b3c,21976b76134eb419,2208774ed8919ab6,223451eebd6061a8,228e926c4faac818,22e10ac0ddb8bb73,22f2cc5708df88be,230256e20bfd61ab,230a91c3826aaad8,230dfb08f981ce7b,231d2daa66789312,231f97ce8c51460e,2331e6a5c3f4dc73,245c03778498b495,249d03a504be80d3,254d39dc062ccbd2,2582aab1c7e668e5,25994ba679ebf4ee,25a77d8c961f70c3,25ec3eb56b6b4711,264c19e1f1c9ae60,26c37a5db50197e6,26d721e2d277c03b,26fbf87d883e1381,2706619ccc47630b,27a41d4c85829617,27ce027e7188bed3,27d1334b3958bd4c,27f379458a4387e7,28158d322104bce2,29093f0853881fc3,291be4e50b1272f1,293ad39389e70011,2964f72e06633f7c,29b2a8ec6424f269,29be03ccaa4e353a,29cc57bb8d704fdc,2a227f58578215a1,2a49e9ee73aac24d,2a4d50f2e99ccc76,2a5bd654ed830e72,2a5cb98cf0749a82,2a948292aaf20bee,2ab2457ed7617293,2b7f74908db2fd5e,2bb02bd91627418d,2bb23624d292d127,2bf91065944bcff4,2c2cefe06f048390,2c3c2602cf51d780,2c6eff2fd3d967c3,2c8ee60bfd04125f,2cc6decf9a73aedd,2d3c50b5aff0f7fb,2d6cbd167e79f48a,2d985a6fd3ae6e5d,2de05f43518e9170,2def80b5a6667abc,2e1c7a0a104906f7,2e28ea6fb9dad3c2,2e55d67003435c14,2ec1dd27e95fdd16,2ef28b3f055cf523,2ef7ed9bfc249bff,2f12d0f639fb7ed0,30727a8e4a68fc64,310a75ecf7e2c0e6,31bc42e2ea163a1a,326652d23fe73e99,32738648a576fea0,32b601132a13cff4,32eae53ef2498b71,32ff8b2fc21b2b61,334cf8d4ab5e2968,33e4acc94ea85bab,34121970d8a2e435,345cd62173c375c7,349493bfe6b68a87,34e028869986bcaf,35256c370615e650,353b2ff8b1040ce4,355f182eb23a2ccf,356b9eb924b82c31,365a74ae25a02341,368098738d8f1936,369e1cf9bc7dc155,36a631c57b93f93b,36bcbae3c6ee20b3,371f8ece65314945,371fc6b7dad5f271,37801617a570a3c1,37d324dbc6c86d16,37d9c18c015bc7f3,380028daa2706e89,38047b50e3443232,385afa7d556e39e8,38925291c659560f,389d2a50fc6e6018,38a52b258e5d26bb,38e48f628d308bce,38e7dedf37c90130,38f64f73d01d25cb,3934246fb674f317,39613a32023e4def,398d972280d662ef,3a22184f3b17f637,3a59b63b97ad1abd,3a6594961b9247e7,3ad0a1c1e5f591d2,3b168eb06ebd1f89,3b47ec04e064477f,3b741eb770b99f1f,3b7b226a0af45f46,3b9d6c2ddaae83d8,3bc3bfd1cec35a7f,3be66cd8abe8095d,3c5edc2725a39f30,3cf8a8fc81e6458d,3d03a8a88ad6670e,3d10c5ac254b9a3d,3d547602bdedb4eb,3d7af3f375b862bd,3db6a8cd5178b215,3e0536ff12f1a0fa,3e7e04c03727b40c,3ec37174114f18dc,3fa1fda35402c93f,40769e6c239f937d,40a32233402db4cb,40a8893aaeffa08b,40be578998668a29,4121071b5398393a,41217059b1eb768a,412868f442f3638e,415285668412204e,41819a1d0f885f45,422a5efe85d59e6a,422ae0b850e3624e,42aa89d313e7188c,4342a5c16979a53f,438b12b60f5db630,439716b7afba87b0,43a9fcb6c2636c61,43c72d85c4d86ffe,44a63aac0ea89a86,44ab1bd3cd6459a6,44dfb4c9f4f58355,45d25d3d28d7248a,464f5ba0daa4d1bb,46539424133f9b74,4697ffef97840f87,46a7f7fae3d2a65c,46c25132e6d22a04,46dc6c870454c7a6,470abab5c440c9c8,476446edcac7d521,479975ca9ff7e370,482d518532477e6f,4831be51e2ddbb5b,48654f1a6ce7f688,48ecc7b4d0968151,49935789e06a9b08,49c9aea86d416b02,49f2638c5dde0b23,4a51115a275d6335,4a55d212cc63c4ad,4a94c9adf5b2a83d,4adb3993b5a32e6d,4b4661fd9113cd4a,4b89a97ed9dfbe2d,4c573a76d2eeba04,4c780a471589d843,4c939cff28c2e1d6,4ca60aafca490f58,4da404cec3b5774d,4dfd5ed22314b4ba,4e0e2e2be4aec51c,4e69dc8770bf27fc,4e7ee9410ff16d57,4e86768ecb577cf9,4eaca33ef0b5c5ac,4f0d3d0c96a754f7,4f24ef2eee54fa06,4f895b74b86ac34f,4f93dfc3d999393f,4f9e4161d703f789,5002dc855d7c1bdd,501f0865fdf45dfd,503cf21ee3992b39,50477cd6f2bd62e8,5068b601735705a4,50949ebfee9eb51d,50fe6dbe276e004f,511b165e8c6f13f1,51340b4703f0e042,514b2105ad3d15de,51529682c38a2bc1,515371262d6da9f5,517535025e084ebd,51b4b1881981e654,52018f93785d6723,523dd9fe1a846c57,52ab310c43b9f99c,52b84c47ea411af2,533ff93b7c9adbf2,535f8a954d8ec638,537522c620805a34,53dbd04f3cafb88f,5439a8ec4be90032,54c8e6597f9cb705,54db209c0e1bb317,55153ab821a66fce,55858df1827ed9d0,55f2a4d171c8eeba,569d5818db7555f3,56e546e08e2e0bf5,571bf6d258f65ed0,5746e8eb5fc789a6,57a3fad03cac36af,57a89b3e2e61ac25,57a99301636eec5a,58a085bb8210cccc,5904bb0bd887a152,592680ab38031b20,595f2141e585c320,59792d2b282b4b29,598ea65d783fa12d,5a06550bbac79916,5b07cf102c5fb661,5b47ab4f89743d00,5b9f648fb54238f9,5bb4f587ecce90c4,5c10a56026ce13dd,5c7115296f0a8c41,5c82b79526ec2376,5c9d6316a51968c5,5d061e6aed59c57d,5d14dbfb09c8184f,5d4ad8bda6371f79,5da27dcac8ccd11c,5dc7c4abc75d1545,5ddd2ca380fd74d8,5e5b5c98afaa1753,5e92d32fd0c115f1,5e98acb32ee72e90,5eb1fc8c755bca61,5ececdeb8cd235c2,5f534ee8ed14f12f,5f8cf29b763648eb,5f970e9e47594541,5fdbc49b328e81d2,60009ff452b7bb54,6043a5c6d7e9545c,604a8deeada90f0c,615e4b316a3f8294,6180e67625d71b41,61d7c3333b73892d,62d2680b4de77b54,631d7f5bc2692fd2,63cb9879559651fa,63dcd49361dd8ec4,63f30685a64914f7,64291515aee9dee9,6441aa82da422799,649850fad69f9228,64ccfcf6dbda1152,64fd06f748cfa1e1,6507b6807f522057,65080b29d91a422f,65e3b4b0759b4d0a,65f802ba40eb4a87,66404798a567d7db,664a24a19f9df45a,6741171642c93081,67c3552004aca7aa,67fb9cddcf543d91,680b9fab03f54e4f,681f89eedac269a3,687a6c8dbd8d7389,690ea04f96a14884,695febfd5efced05,69d7fb6958502e4e,6a00947adb9651a9,6a19b6c520023886,6a20509b65f9a5f1,6a608f2053e604b5,6a7b41a73fab3f66,6a7fcb54bf246310,6b5f333e886b1030,6c86597c4a6c9c5a,6ce22dd14d876fc0,6d1f1af87409128d,6debf18bceee5f8d,6e23ac3f428905c3,6ea325014572ed8d,6ecb5deb3af40c9c,6f3efe76389642cc,6f859da7a88802de,6f8ba6961490ebb5,7007ec7e2ae00712,7019cc71ca384dc7,706c4f9cb0f4cbfd,70a3734bb266ce43,70b1e13de6df8585,70e78ff3961d953a,710a6eca5746445e,71961bdd346c45f8,719796c2b324593d,71ac5a0b99a51edd,71d5752d4d13974c,71ed96a64e932f76,721c6b98cc129aa5,72ee7db2a361ed65,72f84d6cdf836fe5,72ffc690df101ebb,7364921ed673344b,738c1f4089f14c47,73cabe666a66b4ed,741a9dbb11726187,7477b30d3a90be1a,747cbfa17dd7b24d,74930ddd74e36464,74cb99ceb454f355,74d0ebdf42728160,74f02289c9df5432,7514cdc54e3c9502,755edfc1003acdc6,75835efd55ca7167,758398ef7c32ee31,759aade8ac03d23d,75cbdae3b2da61bf,7658f1433b3ee4b8,76cfc8733e521f35,77102d53e4c12acd,7722237b2d9f9568,775864f2dfc88998,775d94fa817efe16,77615112be1fc7e3,77af7adee63083f5,77b7d7f05b292d27,781855483aad9a70,781e845d3e7ddced,7855309698000643,7871917ea1ba35d6,788d85601b22821f,78be9c2cfee2766d,79547b8d831bbcb0,797b90880091722f,79d3f9f9b164ec42,79e8f0811d07f017,7a0d42aefcee50a4,7b956e1f6d56609f,7bc5a66f3fe54503,7c7c52f59ed8d8d8,7c8010dfa98a4a9e,7cb338ecaeac0aa9,7ce830739b018ff3,7d30d09632fe7230,7d3d547e81d1d118,7dcd3a412a157e2c,7e23fb9a6be471fa,7e272e404d9a61d1,7e36d2a6d7c6a341,7e39630e36c59e15,7e666b54122429fb,7ea1d4d3aca20da4,7f05ddab771799a9,7f0b6f363e03b1fb,7f4ef84f10ee483b,7f67edba322d461f,7f6c3d8d319e6d29,7fb216a0c6dee3a9,8035d76170689f4b,810e4e3cf4237f07,811ec8279c97c1f6,81a798b379f98105,81b1a23c9de4ac3e,81c7c8d1bd09a944,82d469a7fec64cb4,83547e5a9e0581a7,8374e8bd3adaa914,842de0c32bc8dcc5,848707be5ef2843c,84a06428e6e455ab,84d6f253344db38e,85499d8904c05f47,858cb9984a20a09d,8592f1d4f8035dc0,85c42c66489010c0,85df3e0b2a2e72af,86380b036b00d3fc,869415c2d19e36f6,86ec5195c2fa82af,871583f211e7dae3,871f1215f671882c,87479c005e2b4043,8777116ab8279358,87e73d580fe6a492,88d648c905124388,88ef12094a20a42c,88f6e5d9344943be,891bd7a5134bf22d,896cd6b48e0b735e,89cc3adb9b3b587e,89d4abe49e730d80,8a068d3c7bcccc01,8a13d3da7f64b8d1,8aae6058589bedbc,8aeb634cd7c272d2,8b566eecfb71cacc,8b789540787ce9b8,8ba13a8355a53b91,8c9910d177e922b6,8cb9738c65481189,8cd8c8520c791196,8cf104b72e4a464b,8d5d3f97369050bd,8d6542a554c1147a,8d7bf99583310094,8da50e10dd1d5cdf,8dc919cddcf1ee78,8ddb224ef5dd08ab,8dfdf0d1c35ecea8,8e6fe95e600f3430,8e8696b916e3b141,8e91532497eb4ddc,8eca0d5db8dc7455,8f8dd4e691330c74,901ea5039cef0f12,909600eff697581d,90b02e69b90016a6,90d8df75aee69274,9118e859d349ab3f,9211a9c1bb57341b,92646708c3651a59,92bf545af3758416,92d4fbf3c4420b32,93c727ebeb0a414e,9422aad366692af1,9453e092e33f7f9c,945faaed7eda27dd,9494f1b99c92c281,94ba76b4f1e267dd,94ca5843379047d8,94f50b5020a69895,9506d52d41abfd92,9588ffb2478b45fc,95ad77412a88f3f5,9638c0c03cca4c6c,965b1fd9c61467ee,96744a8cd6c0588f,9693500202657a6b,96f043b62d77793b,96fad987a10d2178,9730c147304b8039,974a9d7e98c8472b,97c8165dc4f77bea,9837bec0c04f3746,9898a993d4896967,98b28a028bb1ab2a,9a13e9c13c57411f,9a6eb0b35e956927,9aa51ebb679b4e36,9aa61fc93f91d095,9b1235ce3bb3d161,9b18e7f333c1d4f9,9b484cbedc2d7cfc,9b5c4b6fc3e08c7a,9baa27bb65889d34,9c077417ffd3fa41,9cdbbfa2055ac39a,9cfd9c092e1d5a97,9d180fa0ccd52a27,9d4962b03185c07b,9dc1b86497754e73,9dd28e16445d6477,9e5deb7cc4c2e068,9e644939640669fc,9e88ce6227492d86,9e93ea4abd276eb3,9edf8a8267e77699,9eeba5c4a5cc1bff,9f1e01df5796c330,9fb1ebea2c1a32d4,9fd538515af9fc60,a06f4e4a750d260a,a0a074e2d868e618,a0ce4bef0ae97c3f,a0feba02e6cf0ebb,a1266cc7391ae0d6,a17ec51447e9b9f1,a1bbb095cb9ba1c2,a2352b9e2e9687eb,a2d880ad5dea1f45,a30ae8cc148ea059,a34d8ba7899e5277,a356d933075c6552,a374b2c962e658ae,a39ae7824fe671cc,a3c8adc23ab13eb3,a3f168d1790bbff9,a4169662a3549d17,a428c56efe5410fe,a438ee47aaa88b91,a47d0bb7c7e1e8ca,a4df980a1c65fdbe,a5399b214713f180,a57b5ad32276f8c0,a5ce23ef6a443dbd,a5dcdb5ab74beaeb,a5ed733fcbc9048d,a60f2ec7c2ff300b,a62731e90739f195,a65398c11dbc32ca,a664ce85c7ed8514,a7063551ab31b18b,a73284b60aa303ed,a7aef9e157ccc7fb,a7bbeaedc8e63360,a7d9b706b3465142,a7e6e0c9658aa904,a81de501c6f6ddcd,a87c63103cbe8249,a88748f4d223a920,a97b0de6386eca68,a98b2d2aa2acfffe,a9da8d8c21873245,aa107f09071811ca,aa221f469520e809,aac91f96d7555409,aae143ad4554b35b,ab19eae07e101c34,ab2765c008e8f04e,ab82aab9b599caac,ac8b0f8a8a9e0c79,ad17f5c4f7acac25,ad1cf51b8a6c7096,ad66a7c4bb2a77d9,ad8767d2da8435b8,ada19c97379f54bc,adc76ddaa3a13d20,add2d88b887885ee,aefb9a3ccd87421f,af3033548d076333,af4285d1da44a96e,afc5e62226ffbbc0,afca4e7816c70b95,afe3fb6e266aa5d1,b01e713adfd1b66a,b0226cc73c654742,b05d94d34dca4d2b,b084beb3ae6e27e3,b0b6a2622d6e72f0,b1b90a2b3a76dbaa,b2433b5b9845e711,b24ff5260e7c73cd,b2610b50166271d1,b2a79b56df1b85a1,b2ff2ef0d6c98dd7,b33899c67f22fa73,b3642a96ba443130,b3a428c1444c8e47,b3d19bbfbe971a8b,b40b3d8b444ada08,b42133da5f18f92a,b5075976aab8a28f,b51198aeaa434f1a,b55f324fb9f9fd51,b56cb5227f57e719,b671c90cad4a71ee,b69ef139ecd3b757,b6a28de7790e0a7e,b740639a48e688c6,b74ef432b1989b12,b7a7fb5ba5934a89,b7c35ddedb2c5cc3,b7fc9aa161dbdff0,b8042ca0af2f51c7,b829a51c2c2d4551,b83683e48abab9bd,b849f3f75c47a541,b967e77f0832eab9,ba0853e333e60933,ba1d9b18a9a571c1,ba6db671f79ae2d7,bb9c70158c1e22f8,bba66bbd55cbd9a0,bc3013e09410e5b1,bc7613a38819a1f2,bd232dec3bec4319,bd2f4c284a45b3bc,bd48d109e0b65217,bd673df5f240bee5,bddfcc3248f51318,be254519c3e15f64,be85f65a58656cec,be87288ad49b521b,be91ff7eef5b7852,becf87ccd8fdc1d7,bf1a5424e1b24d5b,bff3758517ad9142,c07b4d9d12a670b8,c0b9134fa622f802,c11581d638466192,c18e21e30faad154,c1b787327704c7f3,c1c7f6c2e8d5d2a5,c1d216bbc48bc9b4,c1e947806a47ee4b,c2f48c284c426430,c2fed64ee9b4bf23,c3117eb7dc3df471,c3864e62b7ffedb6,c3cb00c582d26394,c4023b5da8f2ce0d,c41429a8461b2032,c45fe32380ec2ef4,c47848abe71e05bb,c4a6e4fcf36a2033,c59bba942079b5d6,c5a3550ade4c767e,c5bf838f820fcc2e,c5eea4706e290002,c5fc2bc7f3d416f4,c60a8cc2683470c3,c60f282e136b76c7,c629ea495ad5be01,c69690deef0df358,c723729ad62ec697,c7b5d2d6e4e79e98,c8168a63471484b5,c896e7b54e00286a,c898bcae5656e417,c8a92fb86f31447f,c8d82097d68afeae,c9158941815aee62,c985aaf507dd3152,ca20fb3e42f84692,ca27a20b691326fa,ca3962cb8c674650,cb1006bb4ef510ad,cbf484655edb8a33,ccb2ef0f61223a15,ccc6eb3a3ef3e935,cdfefd6c8bb5dddd,ce0986e922fd40d1,ce4aa8c4600d85c5,ce4cf9d5b637a014,cea6cddd5326f6f0,cf0000f4537adc5e,cf4ce294accdd428,cf6868feac4b57ba,cf9bc2ab0b87e572,cfb21609d5f6a845,cfbf210830540a52,d0130073bb6f7a7d,d03d2f08eac22af2,d06b9d11b9265d12,d07589ad1eee4789,d0e8017ad28dfe19,d159096c20e5be8d,d21ae5d0eaaac74c,d282bd3d228df25d,d295a7bb8b39cd5d,d2b073bdd272bda7,d2c52fcd936985b4,d2eeffa9f876f56a,d2f6e544053acf55,d37ee2c1b91eb44a,d3917417a4e4f05d,d3a9cedce74d91ce,d3c2bcd69864ab66,d43289c11944a7a1,d4343b9a6e4f2717,d44e7912d7c1bab1,d46dfa0a902264ca,d46f9bb80b40a33f,d4f67ba4e4e695fa,d5131e7000dad14f,d5784d991f3164ab,d5b9c94a30d7cf28,d5c18b9fbcd08f36,d5ef4f2bb16d9fa3,d66a8e12bc1b27f9,d69f75770edf6e01,d6a371025bcf7e02,d6dba265fd10bc2b,d6e3a104264dd4c6,d7792cca59ed128f,d7ad7fcacbe52893,d7eff81efdc96061,d84645aebf8dca8f,d84c0ca92452e526,d8b41c72e52111ff,d8dde91b9e50a4cc,d9075dd50b1cca09,d91b2ffb8db48ce4,d96e054e72a72ab2,d9748ab66d9903f1,d9960eda3ab4c793,d9befe585a53610f,d9c73fe683ef7785,d9efdb70d39c1c86,da441db0e9fce769,dab8612ea72ac214,db0b0fd02ddc8a93,db40744873920422,dbba7e080e26ec20,dbdad6ff83aadb1c,dbdf9f9df42b2c69,dc65695e569ab466,dc6ef2687950428a,dc901b90d0633a00,dd002690745ec22d,dd17c8da5c1cc0d5,dd18ab2b9c21b361,dd66eddf464f4bb1,de314b30ec34ee35,de4e3af66d68d980,de63a341789daddc,df1c34cb6d9dbcfa,df28ea82c24dc056,df3c6b6f46100a6e,df68734027b2d0c3,dfa0cc44b45911d6,dfeef669b85178f5,dffafa6052629c85,e05a2c1364dd1988,e09b484b7400df95,e0ba27015903a5f3,e107201b7701a928,e148ad14c65c1dfd,e14ca2879156a091,e14ff49747e43acb,e1a6549a4718256b,e1b73b0e1f8d3c72,e211ec7b25919742,e2b858e568731a51,e2bbb611de6511d4,e2d427b0b6dff0d3,e30d21f0d7cc0880,e31587e8b64a7e25,e374fb548aae0ef8,e45baebc6a72e818,e4714debf856a402,e4804e5d87537072,e4b98007c374f061,e500d9c67eb7cec1,e50ee1165aac96b3,e5742545a3591526,e5929e833978d558,e596f88f20c3ec8f,e5b42ce7dd14cc41,e5c6b41bb2adb46c,e5d41b7e3006b249,e5fca2b95c853817,e62845424338161f,e685f0080b144a9c,e6cefb06155dac34,e74c876bd581859b,e758676dd153dff5,e79b0196ae5e27d5,e79dd4bd900b4200,e81277c8be37103b,e82463dae16a79ee,e90b8dcb8b4cfc6b,e920d92582cb15f1,e932a28baa58153e,e995747c51da17f0,ea2754446fe2e1d0,ea55f4b164fa2fb0,eaeb10a22b9d6d7d,eb0472e1f9299d59,eb47e845b2cb0eba,eb62e8e10b72f527,ebd66fe3453f755d,ec5bcfd7dd20c68d,ec8170ec97875620,ec8544c3b04dde27,ec992130e4f7387e,ecd67a438c64e75d,ecdc3a46f8db7a5d,ed9df95f1d43fd4f,edd6b83325de97ca,ee0f481da4520f33,ee4c89fea116872c,ee636271b480f425,eeb352e9ab670763,ef166f5e4a1e04cc,ef9f08487c8cc9c3,efc770e7f2c27b03,efdb8133aabc37fe,f0072e7d6d922b51,f018c205b5199d39,f0641885a8311319,f09b1760a72a26af,f0afa89ecfb6944e,f0d5c40a8c448a86,f0ded3c8f537287b,f0fad1ae48adb805,f140b29a240488c8,f1690b766e32ad76,f170f74128b85209,f1914c6c99d9577d,f1d566c1e044b018,f1e90a572946abda,f26cef5385572630,f2b05cae4e26c094,f32e9279590aa073,f33e805895d6dd30,f38d99b7a22477c9,f3c00fa863debb3b,f3c50f940f5b3106,f3c72658d0a642e1,f4215fc6f4a11aa9,f429d6151c64ce9e,f447e1cda168409b,f5f8da18803c22f3,f606667fe7c6b893,f60ea2c9d69cac35,f639f0fc07d7a39b,f63bfed4d7317be1,f655d7219b8023ec,f6a0d66f51a08d1f,f6da51317fcef92e,f73607ad12ab905d,f753717509f8ea20,f770aa1780a8878e,f7a5d494c618be5d,f7abaa39145df433,f7b588a6cdd60598,f8858586452e1ae7,f90f441cc9311f33,f91ef42e5b381cb9,f93a3a0da36147c7,f96d5cb8d72d9461,f9870b59c6d3c45b,fa056dc3e38cde75,faa6852385b8d530,fb666fb12f337286,fbdcc8e04b7f68d6,fc0cd9b89adde3ab,fc0dcb1f5312423f,fc311dcf2edb1fe9,fc40d61585d7a20a,fcd45c3d0020311b,fcdd5aab1f58e5ee,fce7d2cbef0f4a24,fcf879f8a407a4a9,fd9778f48ea9e227,fdfd1675ebbd57bc,fe0c502f0ee290a7,fea276ef543c780c,feb207119a4a496c,ff26243811447aed,ffa23aec3187f880,ffa98fdac87e91cb,ffb89aac3c3bd89c,ffeb489faf8be584,0275bde6a28e48ad,08ef61b38bdc988b,1250dc0656b3c091,17829ac71aab4e8d,221925bf9ed4e06e,22f3f0f74693bff9,43ce3255529b200a,534b3645dd344ab2,693d1d787d4a22eb,7ec122fc9eedf367,813783478ebb80e6,881646f629ed5b13,9701445db7a7e2f9,9ad3577822ed8af2,a0544eac81df1fc8,a1b20bc47e3c9597,a1e563ed5a217ebb,a41f0b553a07e79d,a96bb7e19625fc8d,afeea48bbb9913ad,b1e1f8b58b12a8bb,b53dd5baea7ac7da,ba263b6ab4b6d619,c2d3fdeffa839418,c331a83aa58c3d33,d2f4f8e0e2610d8c,d4c32d1ea3b676be,d50c03da6d935d87,e8c962358d862e3f,e9c39e7efe3c508d,f656e96a62bb116b,fb515ca95d694c18,ff6a098566877642,ffd9788ba9fec033,
++2da4beb386509b77,
++369cbe906ea72764,
++2cc4c197ee29e291,
++02384a60fda6f2d0,
++5dc3b25986622949,
++6f225b641c5b0708,
++6871d6e4b3ac9a10,
++407eca669212d400,
++5e3dd99e0f067aee,
++57f1b81de55c2842,
++ae0deeafe219c15c,
++6b82bc7d22016cb5
+-- 
+2.56.1.windows.1
+

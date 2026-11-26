@@ -1,0 +1,350 @@
+From be2f0805d1d61989819e74261eadb09e69fa92fb Mon Sep 17 00:00:00 2001
+From: lead <lead@local>
+Date: Thu, 26 Nov 2026 15:22:33 +0800
+Subject: [PATCH 1/3] BCPack decode cache (blake3-keyed, disk-backed) for the
+ NVIDIA build
+
+---
+ Cargo.lock                                 |   1 +
+ crates/victory-hle/Cargo.toml              |   1 +
+ crates/victory-hle/src/modules/dstorage.rs | 108 ++++++++++++-
+ port_bcpack_cache.py                       | 176 +++++++++++++++++++++
+ 4 files changed, 283 insertions(+), 3 deletions(-)
+ create mode 100644 port_bcpack_cache.py
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 29bab8c..ffb4473 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -689,6 +689,7 @@ dependencies = [
+ name = "victory-hle"
+ version = "0.1.0"
+ dependencies = [
++ "blake3",
+  "opus-pure",
+  "tempfile",
+  "tracing",
+diff --git a/crates/victory-hle/Cargo.toml b/crates/victory-hle/Cargo.toml
+index d91f14f..0a69ef8 100644
+--- a/crates/victory-hle/Cargo.toml
++++ b/crates/victory-hle/Cargo.toml
+@@ -12,6 +12,7 @@ victory-gpu.workspace = true
+ victory-loader.workspace = true
+ victory-pe.workspace = true
+ victory-formats.workspace = true
++blake3.workspace = true
+ opus-pure.workspace = true
+ zlib-rs.workspace = true
+ tracing.workspace = true
+diff --git a/crates/victory-hle/src/modules/dstorage.rs b/crates/victory-hle/src/modules/dstorage.rs
+index a44d599..b518419 100644
+--- a/crates/victory-hle/src/modules/dstorage.rs
++++ b/crates/victory-hle/src/modules/dstorage.rs
+@@ -1409,9 +1409,8 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
+         source
+     };
+     into_destination(request, size, |out| match tables {
+-        Some(tables) => bcpack::decode(bc, &source, out, tables)
+-            .map(|()| out.len())
+-            .map_err(|e| fail(INVALID_DATA, &e.to_string())),
++        Some(tables) => bcpack_decode_cached(bc, &source, out, tables)
++            .map_err(|hr| fail(hr, "bcpack")),
+         None => inflate(&source, out).map_err(|hr| fail(hr, "zlib")),
+     })?;
+     tracing::trace!(
+@@ -1423,6 +1422,109 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
+     Ok(())
+ }
+ 
++/// Unpacks a BCPack stream, from the decoded-chunk cache when the same
++/// stream was unpacked before.
++///
++/// The console's decompression block unpacks BCPack off the processor; the
++/// software decoder here runs at 20 to 48 MB/s, and 60 to 85% of that is the
++/// entropy stage. A chunk once decoded is the same bytes every time the title
++/// asks for it (every launch, every revisit), so keeping the result costs disk
++/// and saves the whole decode.
++///
++/// Keyed by the format, the destination length and the packed bytes (blake3,
++/// first 32 hex digits). `VICTORY_BCPACK_CACHE=0` turns it off;
++/// `VICTORY_BCPACK_CACHE_DIR` names the folder (default: `bcpack` under the
++/// cache directory). Writes are atomic (temporary file, then rename), and a
++/// failed write is only a lost optimisation.
++fn bcpack_decode_cached(
++    bc: u8,
++    source: &[u8],
++    out: &mut [u8],
++    tables: &Tables,
++) -> Result<usize, HRESULT> {
++    static ON: OnceLock<bool> = OnceLock::new();
++    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_BCPACK_CACHE").is_none_or(|v| v != "0"));
++    let dir = if on { bcpack_cache_dir() } else { None };
++    let Some(dir) = dir else {
++        return decode_bcpack(bc, source, out, tables);
++    };
++    let mut hasher = blake3::Hasher::new();
++    hasher.update(&[bc]);
++    hasher.update(&(out.len() as u64).to_le_bytes());
++    hasher.update(source);
++    let hex = hasher.finalize().to_hex();
++    let path = dir.join(format!("{}.bc{bc}", &hex[..32]));
++    if let Ok(bytes) = std::fs::read(&path)
++        && bytes.len() == out.len()
++    {
++        out.copy_from_slice(&bytes);
++        return Ok(out.len());
++    }
++    decode_bcpack(bc, source, out, tables)?;
++    write_bcpack_cache(&dir, &path, out);
++    Ok(out.len())
++}
++
++/// The folder decoded BCPack chunks live in, made on first use.
++fn bcpack_cache_dir() -> Option<std::path::PathBuf> {
++    let dir = match std::env::var_os("VICTORY_BCPACK_CACHE_DIR") {
++        Some(p) => std::path::PathBuf::from(p),
++        None => {
++            let base = match std::env::var_os("VICTORY_CACHE_DIR") {
++                Some(p) => std::path::PathBuf::from(p),
++                None => std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
++                    .join("victory")
++                    .join("cache"),
++            };
++            base.join("bcpack")
++        }
++    };
++    match std::fs::create_dir_all(&dir) {
++        Ok(()) => Some(dir),
++        Err(e) => {
++            tracing::warn!(dir = %dir.display(), error = %e, "bcpack: no cache folder");
++            None
++        }
++    }
++}
++
++/// Writes a decoded chunk to `path` through a temporary file, so a reader
++/// never sees half of it; two workers decoding the same stream race harmlessly
++/// (the second rename may fail, and the bytes are the same).
++fn write_bcpack_cache(dir: &std::path::Path, path: &std::path::Path, bytes: &[u8]) {
++    use std::io::Write as _;
++    static COUNT: AtomicU64 = AtomicU64::new(0);
++    let n = COUNT.fetch_add(1, Ordering::Relaxed);
++    let temp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
++    let written = std::fs::File::create(&temp).and_then(|mut f| {
++        f.write_all(bytes)?;
++        f.sync_all()
++    });
++    if written.is_err() {
++        let _ = std::fs::remove_file(&temp);
++        return;
++    }
++    if std::fs::rename(&temp, path).is_err() {
++        let _ = std::fs::remove_file(&temp);
++    }
++}
++
++/// The decoder itself, for a chunk the cache does not hold.
++fn decode_bcpack(
++    bc: u8,
++    source: &[u8],
++    out: &mut [u8],
++    tables: &Tables,
++) -> Result<usize, HRESULT> {
++    match bcpack::decode(bc, source, out, tables) {
++        Ok(()) => Ok(out.len()),
++        Err(e) => {
++            tracing::warn!(bc, error = %e, "dstorage: BCPack stream does not decode");
++            Err(INVALID_DATA)
++        }
++    }
++}
++
+ /// Inflates a zlib stream into `out`, returning the bytes written. A stream
+ /// that ends short of `out` passes: the title's chunks fill it exactly, and
+ /// nothing says that is required.
+diff --git a/port_bcpack_cache.py b/port_bcpack_cache.py
+new file mode 100644
+index 0000000..952d9d2
+--- /dev/null
++++ b/port_bcpack_cache.py
+@@ -0,0 +1,176 @@
++"""Port the decoded-BCPack chunk cache from vf-fsr into vf-nvidia."""
++
++import io
++import os
++
++ROOT = r"E:\gta6\work\vf-nvidia"
++HLE = os.path.join(ROOT, "crates", "victory-hle", "src", "modules", "dstorage.rs")
++CARGO = os.path.join(ROOT, "crates", "victory-hle", "Cargo.toml")
++
++
++def read(p):
++    with io.open(p, "r", encoding="utf-8", newline="") as f:
++        return f.read()
++
++
++def write(p, t):
++    with io.open(p, "w", encoding="utf-8", newline="") as f:
++        f.write(t)
++
++
++ok = True
++
++# 1. the dependency
++cargo = read(CARGO)
++if "blake3" not in cargo:
++    old = "victory-formats.workspace = true\n"
++    cargo = cargo.replace(old, old + "blake3.workspace = true\n", 1)
++    write(CARGO, cargo)
++    print("  ok: Cargo.toml blake3")
++else:
++    print("  skip: Cargo.toml blake3")
++
++# 2. the call site
++text = read(HLE)
++OLD = """    into_destination(request, size, |out| match tables {
++        Some(tables) => bcpack::decode(bc, &source, out, tables)
++            .map(|()| out.len())
++            .map_err(|e| fail(INVALID_DATA, &e.to_string())),
++        None => inflate(&source, out).map_err(|hr| fail(hr, "zlib")),
++    })?;
++"""
++NEW = """    into_destination(request, size, |out| match tables {
++        Some(tables) => bcpack_decode_cached(bc, &source, out, tables)
++            .map_err(|hr| fail(hr, "bcpack")),
++        None => inflate(&source, out).map_err(|hr| fail(hr, "zlib")),
++    })?;
++"""
++if OLD in text:
++    text = text.replace(OLD, NEW, 1)
++    print("  ok: call site")
++elif NEW in text:
++    print("  skip: call site (already)")
++else:
++    print("  FAIL: call site anchor")
++    ok = False
++
++# 3. the functions, before inflate's doc comment
++ANCHOR = """/// Inflates a zlib stream into `out`, returning the bytes written. A stream
++"""
++FUNCS = """/// Unpacks a BCPack stream, from the decoded-chunk cache when the same
++/// stream was unpacked before.
++///
++/// The console's decompression block unpacks BCPack off the processor; the
++/// software decoder here runs at 20 to 48 MB/s, and 60 to 85% of that is the
++/// entropy stage. A chunk once decoded is the same bytes every time the title
++/// asks for it (every launch, every revisit), so keeping the result costs disk
++/// and saves the whole decode.
++///
++/// Keyed by the format, the destination length and the packed bytes (blake3,
++/// first 32 hex digits). `VICTORY_BCPACK_CACHE=0` turns it off;
++/// `VICTORY_BCPACK_CACHE_DIR` names the folder (default: `bcpack` under the
++/// cache directory). Writes are atomic (temporary file, then rename), and a
++/// failed write is only a lost optimisation.
++fn bcpack_decode_cached(
++    bc: u8,
++    source: &[u8],
++    out: &mut [u8],
++    tables: &Tables,
++) -> Result<usize, HRESULT> {
++    static ON: OnceLock<bool> = OnceLock::new();
++    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_BCPACK_CACHE").is_none_or(|v| v != "0"));
++    let dir = if on { bcpack_cache_dir() } else { None };
++    let Some(dir) = dir else {
++        return decode_bcpack(bc, source, out, tables);
++    };
++    let mut hasher = blake3::Hasher::new();
++    hasher.update(&[bc]);
++    hasher.update(&(out.len() as u64).to_le_bytes());
++    hasher.update(source);
++    let hex = hasher.finalize().to_hex();
++    let path = dir.join(format!("{}.bc{bc}", &hex[..32]));
++    if let Ok(bytes) = std::fs::read(&path)
++        && bytes.len() == out.len()
++    {
++        out.copy_from_slice(&bytes);
++        return Ok(out.len());
++    }
++    decode_bcpack(bc, source, out, tables)?;
++    write_bcpack_cache(&dir, &path, out);
++    Ok(out.len())
++}
++
++/// The folder decoded BCPack chunks live in, made on first use.
++fn bcpack_cache_dir() -> Option<std::path::PathBuf> {
++    let dir = match std::env::var_os("VICTORY_BCPACK_CACHE_DIR") {
++        Some(p) => std::path::PathBuf::from(p),
++        None => {
++            let base = match std::env::var_os("VICTORY_CACHE_DIR") {
++                Some(p) => std::path::PathBuf::from(p),
++                None => std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
++                    .join("victory")
++                    .join("cache"),
++            };
++            base.join("bcpack")
++        }
++    };
++    match std::fs::create_dir_all(&dir) {
++        Ok(()) => Some(dir),
++        Err(e) => {
++            tracing::warn!(dir = %dir.display(), error = %e, "bcpack: no cache folder");
++            None
++        }
++    }
++}
++
++/// Writes a decoded chunk to `path` through a temporary file, so a reader
++/// never sees half of it; two workers decoding the same stream race harmlessly
++/// (the second rename may fail, and the bytes are the same).
++fn write_bcpack_cache(dir: &std::path::Path, path: &std::path::Path, bytes: &[u8]) {
++    use std::io::Write as _;
++    static COUNT: AtomicU64 = AtomicU64::new(0);
++    let n = COUNT.fetch_add(1, Ordering::Relaxed);
++    let temp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
++    let written = std::fs::File::create(&temp).and_then(|mut f| {
++        f.write_all(bytes)?;
++        f.sync_all()
++    });
++    if written.is_err() {
++        let _ = std::fs::remove_file(&temp);
++        return;
++    }
++    if std::fs::rename(&temp, path).is_err() {
++        let _ = std::fs::remove_file(&temp);
++    }
++}
++
++/// The decoder itself, for a chunk the cache does not hold.
++fn decode_bcpack(
++    bc: u8,
++    source: &[u8],
++    out: &mut [u8],
++    tables: &Tables,
++) -> Result<usize, HRESULT> {
++    match bcpack::decode(bc, source, out, tables) {
++        Ok(()) => Ok(out.len()),
++        Err(e) => {
++            tracing::warn!(bc, error = %e, "dstorage: BCPack stream does not decode");
++            Err(INVALID_DATA)
++        }
++    }
++}
++
++/// Inflates a zlib stream into `out`, returning the bytes written. A stream
++"""
++if "fn bcpack_decode_cached" not in text:
++    if ANCHOR in text:
++        text = text.replace(ANCHOR, FUNCS, 1)
++        print("  ok: cache functions")
++    else:
++        print("  FAIL: functions anchor")
++        ok = False
++else:
++    print("  skip: cache functions (already)")
++
++write(HLE, text)
++print("DONE" if ok else "PARTIAL")
+\ No newline at end of file
+-- 
+2.56.1.windows.1
+

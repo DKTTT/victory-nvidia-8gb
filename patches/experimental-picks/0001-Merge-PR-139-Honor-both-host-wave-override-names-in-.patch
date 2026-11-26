@@ -1,0 +1,288 @@
+From 96b65441423abf39320cf56cfce8eaa78303c929 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Thu, 26 Nov 2026 01:27:23 -0600
+Subject: [PATCH 01/10] Merge PR #139: Honor both host wave override names in
+ translate and translate --warm
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/victory/src/main.rs                  | 18 ++++--
+ apps/victory/src/translate.rs             | 16 +++---
+ apps/victory/src/translate/host_wave.rs   | 34 ++++++++++++
+ apps/victory/tests/translate_host_wave.rs | 67 +++++++++++++++++++++++
+ crates/victory-shader/src/emit/lower.rs   | 21 ++++---
+ crates/victory-shader/src/emit/mod.rs     |  2 +-
+ 6 files changed, 134 insertions(+), 24 deletions(-)
+ create mode 100644 apps/victory/src/translate/host_wave.rs
+ create mode 100644 apps/victory/tests/translate_host_wave.rs
+
+diff --git a/apps/victory/src/main.rs b/apps/victory/src/main.rs
+index 8b76b89..15798c9 100644
+--- a/apps/victory/src/main.rs
++++ b/apps/victory/src/main.rs
+@@ -73,6 +73,11 @@ enum Command {
+     },
+     /// Run every shader found (containers, SGD5 files) through the
+     /// translator and report what it cannot handle yet.
++    ///
++    /// VICTORY_HOST_WAVE overrides the host wave width, including with --warm.
++    /// VICTORY_HOST_MAX_WAVE is a compatibility alias. When both values are
++    /// valid, VICTORY_HOST_WAVE takes precedence. Zero means unknown width.
++    /// For ordinary translation, VICTORY_HOST_RDNA=1 selects RDNA float settings.
+     Translate {
+         paths: Vec<PathBuf>,
+         /// Check emitted DXIL with dxil.dll's validator (`VICTORY_DXIL`,
+@@ -209,14 +214,15 @@ fn main() -> Result<()> {
+             if let Some(n) = std::env::var("VICTORY_VIEW_LIMIT").ok().and_then(|v| v.parse().ok()) {
+                 victory_shader::emit::set_view_heap_limit(n);
+             }
+-            // `VICTORY_HOST_WAVE=32`: translate as for a GPU whose waves are at most 32 lanes
+-            if let Some(n) = std::env::var("VICTORY_HOST_WAVE").ok().and_then(|v| v.parse().ok()) {
+-                victory_shader::emit::set_host_max_wave(n);
+-            }
++            let wave = translate::host_wave::select(
++                std::env::var("VICTORY_HOST_WAVE").ok().as_deref(),
++                std::env::var("VICTORY_HOST_MAX_WAVE").ok().as_deref(),
++                |message| eprintln!("{message}"),
++            );
+             if let Some(file) = warm {
+-                return translate::warm(paths, &file, jobs);
++                return translate::warm(paths, &file, jobs, wave);
+             }
+-            translate::run(paths, validate, pipelines, list, jobs)
++            translate::run(paths, validate, pipelines, list, jobs, wave)
+         }
+         Command::Shaders { paths, jobs, list } => translate::precompile(paths, jobs, list),
+         #[cfg(windows)]
+diff --git a/apps/victory/src/translate.rs b/apps/victory/src/translate.rs
+index 0e7b608..4c9896f 100644
+--- a/apps/victory/src/translate.rs
++++ b/apps/victory/src/translate.rs
+@@ -1,6 +1,8 @@
+ //! The offline batch: every shader found goes through the translator, and
+ //! what it cannot handle yet is tallied (decision 0003).
+ 
++pub(crate) mod host_wave;
++
+ use std::collections::{BTreeMap, HashSet};
+ use std::path::{Path, PathBuf};
+ use std::sync::Mutex;
+@@ -156,7 +158,7 @@ struct Checks {
+ /// translated into the run's shader cache, on `jobs` threads; nothing is
+ /// made on the GPU. A run of the title then finds them there instead of
+ /// translating each at its first use.
+-pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()> {
++pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>, wave: Option<u32>) -> Result<()> {
+     // `--warm all`: every container found, whatever its hash.
+     let all = file.as_os_str() == "all";
+     let mut wanted: HashSet<String> = HashSet::new();
+@@ -193,7 +195,7 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
+             let next = AtomicUsize::new(0);
+             std::thread::scope(|s| {
+                 for _ in 0..threads.min(jobs.len()) {
+-                    s.spawn(|| {
++                    host_wave::spawn(s, wave, || {
+                         while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                             let Some(bytes) = job.bytes() else {
+                                 continue;
+@@ -239,17 +241,13 @@ pub fn run(
+     pipelines: bool,
+     list: bool,
+     jobs: Option<usize>,
++    wave: Option<u32>,
+ ) -> Result<()> {
+     // Dumped shaders and validator reports are game-derived (rule #1).
+     if let Some(dir) = std::env::var_os("VICTORY_EMIT_DUMP") {
+         victory_core::ensure_outside_repo(Path::new(&dir))?;
+     }
+     let paths = crate::default_paths(paths)?;
+-    // `VICTORY_HOST_MAX_WAVE=32`: translate as for a host whose waves have
+-    // at most 32 lanes (as the runtime does on such a card).
+-    if let Some(n) = std::env::var("VICTORY_HOST_MAX_WAVE").ok().and_then(|v| v.parse().ok()) {
+-        victory_shader::emit::set_host_max_wave(n);
+-    }
+     // `VICTORY_HOST_RDNA=1`: as for an AMD RDNA card (`VICTORY_RDNA_FLOAT`).
+     victory_shader::emit::set_host_rdna(std::env::var_os("VICTORY_HOST_RDNA").is_some_and(|v| v == "1"));
+     let dll = validate.then(Validator::default_path).flatten();
+@@ -290,7 +288,7 @@ pub fn run(
+             let next = AtomicUsize::new(0);
+             std::thread::scope(|s| {
+                 for _ in 0..threads.min(jobs.len()) {
+-                    s.spawn(|| {
++                    host_wave::spawn(s, wave, || {
+                         let mut t = Tally {
+                             list,
+                             ..Tally::default()
+@@ -973,7 +971,7 @@ mod tests {
+         // SAFETY: no other test in this binary touches the environment.
+         unsafe { std::env::set_var("VICTORY_EMIT_DUMP", env!("CARGO_MANIFEST_DIR")) };
+         let missing = std::env::temp_dir().join("victory-translate-no-such-dir");
+-        let err = super::run(vec![missing], false, false, false, Some(1)).unwrap_err();
++        let err = super::run(vec![missing], false, false, false, Some(1), None).unwrap_err();
+         // SAFETY: as above; unset so a later test's `run` is not refused.
+         unsafe { std::env::remove_var("VICTORY_EMIT_DUMP") };
+         assert!(
+diff --git a/apps/victory/src/translate/host_wave.rs b/apps/victory/src/translate/host_wave.rs
+new file mode 100644
+index 0000000..648f086
+--- /dev/null
++++ b/apps/victory/src/translate/host_wave.rs
+@@ -0,0 +1,34 @@
++/// Resolve both spellings once, before dispatching either translate mode.
++pub(crate) fn select(
++    wave: Option<&str>,
++    alias: Option<&str>,
++    warn: impl FnOnce(String),
++) -> Option<u32> {
++    let wave = wave.and_then(|value| value.parse::<u32>().ok());
++    let alias = alias.and_then(|value| value.parse::<u32>().ok());
++    if let Some(alias) = alias {
++        match wave {
++            Some(wave) if wave != alias => warn(format!(
++                "using VICTORY_HOST_WAVE={wave} over VICTORY_HOST_MAX_WAVE={alias}"
++            )),
++            None => warn(format!(
++                "using VICTORY_HOST_MAX_WAVE={alias} (alias for VICTORY_HOST_WAVE)"
++            )),
++            _ => {}
++        }
++    }
++    wave.or(alias)
++}
++
++/// Both translate modes start their workers here. Set the explicit width
++/// before the worker can open the host, fingerprint a shader, or translate.
++pub(crate) fn spawn<'scope>(
++    scope: &'scope std::thread::Scope<'scope, '_>,
++    wave: Option<u32>,
++    work: impl FnOnce() + Send + 'scope,
++) {
++    scope.spawn(move || {
++        victory_shader::emit::set_thread_max_wave(wave);
++        work();
++    });
++}
+diff --git a/apps/victory/tests/translate_host_wave.rs b/apps/victory/tests/translate_host_wave.rs
+new file mode 100644
+index 0000000..21a85d9
+--- /dev/null
++++ b/apps/victory/tests/translate_host_wave.rs
+@@ -0,0 +1,67 @@
++#[path = "../src/translate/host_wave.rs"]
++mod host_wave;
++
++use victory_shader::emit::{host_settings, set_host_max_wave};
++
++#[test]
++fn alias_survives_first_host_probe() {
++    let wave = host_wave::select(None, Some("32"), |_| {});
++    std::thread::scope(|scope| {
++        host_wave::spawn(scope, wave, || {
++            // Windows publishes WaveLaneCountMax before the cache fingerprints
++            // host_settings() and the translator reads the same effective width.
++            set_host_max_wave(64);
++            assert_eq!(host_settings()[0], 32);
++        });
++    });
++    // A thread outside translate still sees the adapter.
++    assert_eq!(host_settings()[0], 64);
++
++    // This integration binary owns the mock adapter state. Exercise the
++    // shared worker setup with no probe (ordinary) and a later probe (warm).
++    for (wave, alias, ordinary, warm) in [
++        (None, None, 0, 64),
++        (Some("32"), None, 32, 32),
++        (None, Some("32"), 32, 32),
++        (Some("32"), Some("32"), 32, 32),
++        (Some("32"), Some("64"), 32, 32),
++        (Some("bad"), Some("48"), 48, 48),
++        (Some("bad"), Some("bad"), 0, 64),
++        (Some("0"), Some("64"), 0, 0),
++        (None, Some("0"), 0, 0),
++        (Some(" 32"), Some("-1"), 0, 64),
++    ] {
++        set_host_max_wave(0);
++        std::thread::scope(|scope| {
++            host_wave::spawn(scope, host_wave::select(wave, alias, |_| {}), || {
++                assert_eq!(host_settings()[0], ordinary, "{wave:?} / {alias:?}");
++                set_host_max_wave(64);
++                assert_eq!(host_settings()[0], warm, "{wave:?} / {alias:?}");
++            });
++        });
++    }
++    set_host_max_wave(0);
++}
++
++#[test]
++fn reports_alias_and_conflict_at_selection() {
++    for (preferred, alias, expected) in [
++        (
++            None,
++            Some("32"),
++            Some("using VICTORY_HOST_MAX_WAVE=32 (alias for VICTORY_HOST_WAVE)"),
++        ),
++        (
++            Some("32"),
++            Some("64"),
++            Some("using VICTORY_HOST_WAVE=32 over VICTORY_HOST_MAX_WAVE=64"),
++        ),
++        (Some("32"), Some("32"), None),
++        (Some("32"), Some("bad"), None),
++        (None, None, None),
++    ] {
++        let mut notice = None;
++        let _ = host_wave::select(preferred, alias, |message| notice = Some(message));
++        assert_eq!(notice.as_deref(), expected);
++    }
++}
+diff --git a/crates/victory-shader/src/emit/lower.rs b/crates/victory-shader/src/emit/lower.rs
+index cb20b8b..083d18b 100644
+--- a/crates/victory-shader/src/emit/lower.rs
++++ b/crates/victory-shader/src/emit/lower.rs
+@@ -1179,17 +1179,22 @@ pub(super) fn with_mask_ops_on_numbers<R>(translate: impl FnOnce() -> R) -> R {
+ }
+ 
+ pub(super) fn host_max_wave() -> u32 {
+-    #[cfg(test)]
+-    if let Some(lanes) = TEST_HOST_WAVE.get() {
+-        return lanes;
+-    }
+-    HOST_MAX_WAVE.load(std::sync::atomic::Ordering::Relaxed)
++    THREAD_MAX_WAVE
++        .get()
++        .unwrap_or_else(|| HOST_MAX_WAVE.load(std::sync::atomic::Ordering::Relaxed))
+ }
+ 
+-#[cfg(test)]
+ thread_local! {
+-    /// A test's host wave size, for its thread only ([`set_host_max_wave`] is the process's).
+-    pub(super) static TEST_HOST_WAVE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
++    pub(super) static THREAD_MAX_WAVE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
++}
++
++#[cfg(all(test, windows))]
++pub(super) use THREAD_MAX_WAVE as TEST_HOST_WAVE;
++
++/// Override the detected wave width for the current translation worker.
++/// `None` follows the host, including an adapter first opened by that worker.
++pub fn set_thread_max_wave(lanes: Option<u32>) {
++    THREAD_MAX_WAVE.set(lanes);
+ }
+ 
+ pub(super) fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
+diff --git a/crates/victory-shader/src/emit/mod.rs b/crates/victory-shader/src/emit/mod.rs
+index 1203aea..62ff0b6 100644
+--- a/crates/victory-shader/src/emit/mod.rs
++++ b/crates/victory-shader/src/emit/mod.rs
+@@ -118,7 +118,7 @@ use crate::{ShaderError, io, ir, resource, structure};
+ 
+ pub use bitcode::census;
+ pub use sampler::StaticSampler;
+-pub use lower::{host_settings, set_host_max_wave, set_host_rdna};
++pub use lower::{host_settings, set_host_max_wave, set_host_rdna, set_thread_max_wave};
+ pub use rect::rect_list_gs;
+ pub use shader::{
+     MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
+-- 
+2.56.1.windows.1
+

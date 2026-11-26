@@ -1,0 +1,453 @@
+From 25eae8f08bc2c22ac6e62a6b3527af3b15c4269c Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Thu, 26 Nov 2026 01:27:37 -0600
+Subject: [PATCH 02/10] Merge PR #4: Shaders: run LDS flag regions on 32-lane
+ GPUs
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/victory-gpu/src/shader_cache.rs        |   1 +
+ crates/victory-shader/src/emit/lower.rs       | 255 +++++++++++++++++-
+ .../victory-shader/src/emit/wave64_tests.rs   | 144 ++++++++++
+ 3 files changed, 398 insertions(+), 2 deletions(-)
+
+diff --git a/crates/victory-gpu/src/shader_cache.rs b/crates/victory-gpu/src/shader_cache.rs
+index b5d0392..71e423d 100644
+--- a/crates/victory-gpu/src/shader_cache.rs
++++ b/crates/victory-gpu/src/shader_cache.rs
+@@ -114,6 +114,7 @@ fn build() -> [u8; 32] {
+             "VICTORY_WAVE_DEEP_SKIPS",
+             "VICTORY_WAVE_OWN_BITS",
+             "VICTORY_WAVE_LOCAL",
++            "VICTORY_LDS_FLAGS",
+             "VICTORY_F16_NEAREST",
+             "VICTORY_HELPER_OWN",
+             "VICTORY_FIRSTLANE_OWN",
+diff --git a/crates/victory-shader/src/emit/lower.rs b/crates/victory-shader/src/emit/lower.rs
+index 083d18b..fe82ed7 100644
+--- a/crates/victory-shader/src/emit/lower.rs
++++ b/crates/victory-shader/src/emit/lower.rs
+@@ -976,8 +976,15 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
+             }
+         }
+     }
+-    if (0..n).any(|r| reads[r] && writes[r]) {
+-        return None;
++    // A region that reads and writes LDS is still taken when it only raises flags
++    // (`lds_flag_region`): a read that misses the other host wave's write changes nothing
++    // the region leaves behind.
++    let flags_on = std::env::var_os("VICTORY_LDS_FLAGS").is_none_or(|v| v != "0");
++    for r in (0..n).filter(|&r| reads[r] && writes[r]).collect::<Vec<_>>() {
++        let blocks: Vec<usize> = (0..n).filter(|&b| !all[b] && find(&mut region, b) == r).collect();
++        if !(flags_on && lds_flag_region(p, st, &blocks)) {
++            return None;
++        }
+     }
+     let mut meet = vec![(false, false); n];
+     for b in 0..n {
+@@ -994,6 +1001,250 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
+     Some(meet)
+ }
+ 
++/// Whether a lane-branch region (`blocks`, see [`lds_meetings`]) that both reads and writes
++/// LDS only raises flags, so that it may run as two host waves with group barriers at its
++/// edges alone. The console runs such a region as one wave, where a lane's read sees every
++/// write before it; split in two, a read may miss the other half's write. That changes nothing
++/// the region leaves behind when:
++/// - every LDS access in it is a `ds_read_b32` or `ds_write_b32` at a constant address, and
++///   every write stores the same constant;
++/// - one address at most is both read and written in it (the flag), and every write a lane
++///   can reach after one of its reads goes to that flag;
++/// - it has no other effect (no store, atomic, export, message or barrier);
++/// - no value it computes is used after it.
++///
++/// A missed write only makes a lane go on as if the flag were still down; whatever that lane
++/// writes is the flag's own constant, which the write it missed has already put there. So the
++/// flag ends up raised exactly when some lane raises it, as on the console, and no other word
++/// or register depends on when it was seen.
++fn lds_flag_region(p: &Program, st: &Structured, blocks: &[usize]) -> bool {
++    let inside: HashSet<usize> = blocks.iter().copied().collect();
++    // where each value is written: (block, instruction)
++    let mut def: HashMap<Value, (usize, usize)> = HashMap::new();
++    for (b, block) in p.blocks.iter().enumerate() {
++        for (i, inst) in block.insts.iter().enumerate() {
++            for &(_, v) in &inst.writes {
++                def.insert(v, (b, i));
++            }
++        }
++    }
++    let inline = |op: &Operand| -> Option<u32> {
++        match *op {
++            Operand::Const(c @ 128..=192) => Some(u32::from(c) - 128),
++            Operand::Const(c @ 193..=208) => Some((-(i32::from(c) - 192)) as u32),
++            Operand::Literal(x) => Some(x),
++            _ => None,
++        }
++    };
++    // a VGPR value a `v_mov_b32` of a constant wrote, unguarded or under the same guard as `at`
++    let constant = |v: Option<Value>, at: (usize, usize)| -> Option<u32> {
++        let (b, i) = *def.get(&v?)?;
++        let inst = &p.blocks[b].insts[i];
++        if inst.name() != "v_mov_b32" {
++            return None;
++        }
++        let guard = st.guards.get(b).and_then(|g| g.get(i)).copied().flatten();
++        let same = guard.is_none() || (b == at.0 && guard == st.guards[at.0][at.1]);
++        let Fields::Valu(valu) = &inst.fields else { return None };
++        if !same || valu.dpp.is_some() || valu.sdwa.is_some() {
++            return None;
++        }
++        inline(valu.src.first()?)
++    };
++    // every LDS access: (block, index, is_read, address)
++    let mut access: Vec<(usize, usize, bool, u32)> = Vec::new();
++    let mut stored: Option<u32> = None;
++    for &b in blocks {
++        for (i, inst) in p.blocks[b].insts.iter().enumerate() {
++            let name = inst.name();
++            if name.contains("store")
++                || name.contains("atomic")
++                || name.starts_with("exp")
++                || name.starts_with("s_sendmsg")
++                || name == "s_barrier"
++            {
++                return false;
++            }
++            let Fields::Ds { addr, data, offset0, offset1, gds, .. } = &inst.fields else {
++                if name.starts_with("ds_") {
++                    return false;
++                }
++                continue;
++            };
++            if name.starts_with("ds_swizzle") || name.contains("permute") {
++                continue;
++            }
++            let is_read = match name {
++                "ds_read_b32" => true,
++                "ds_write_b32" => false,
++                _ => return false,
++            };
++            if *gds {
++                return false;
++            }
++            let Some(Operand::Vector { reg, .. }) = *addr else { return false };
++            let Some(base) = constant(inst.read(Reg::V(reg)), (b, i)) else { return false };
++            let at = base.wrapping_add(u32::from(*offset0) | u32::from(*offset1) << 8);
++            if !is_read {
++                let Some(&Operand::Vector { reg, .. }) = data.first() else { return false };
++                let Some(k) = constant(inst.read(Reg::V(reg)), (b, i)) else { return false };
++                if stored.is_some_and(|s| s != k) {
++                    return false;
++                }
++                stored = Some(k);
++            }
++            access.push((b, i, is_read, at));
++        }
++    }
++    let read_at: HashSet<u32> = access.iter().filter(|a| a.2).map(|a| a.3).collect();
++    let written_at: HashSet<u32> = access.iter().filter(|a| !a.2).map(|a| a.3).collect();
++    let flags: Vec<u32> = read_at.intersection(&written_at).copied().collect();
++    if flags.len() > 1 {
++        return false;
++    }
++    if let Some(&flag) = flags.first() {
++        // the blocks of the region a lane can reach from `b` along one edge or more
++        let succ = |b: usize| -> Vec<usize> {
++            match st.exits[b] {
++                LaneExit::Jump(t) => vec![t],
++                LaneExit::Branch { taken, not_taken, .. } => vec![taken, not_taken],
++                LaneExit::End | LaneExit::Indirect => Vec::new(),
++            }
++        };
++        for &(rb, ri, is_read, _) in &access {
++            if !is_read {
++                continue;
++            }
++            let mut seen: HashSet<usize> = HashSet::new();
++            let mut work: Vec<usize> = succ(rb).into_iter().filter(|t| inside.contains(t)).collect();
++            while let Some(b) = work.pop() {
++                if seen.insert(b) {
++                    work.extend(succ(b).into_iter().filter(|t| inside.contains(t)));
++                }
++            }
++            let after = access.iter().any(|&(wb, wi, w_read, at)| {
++                !w_read && at != flag && ((wb == rb && wi > ri) || seen.contains(&wb))
++            });
++            if after {
++                return false;
++            }
++        }
++    }
++    // Nothing the region computes is used after it: no register it writes is live, lane by
++    // lane, where a lane leaves it. A lane's own write kills a register for that lane (an
++    // unguarded instruction that writes the whole dword); what an instruction reads of a VGPR
++    // only for the lanes outside EXEC (the old value of the one it writes) is no use.
++    let succ = |b: usize| -> Option<Vec<usize>> {
++        match st.exits[b] {
++            LaneExit::Jump(t) => Some(vec![t]),
++            LaneExit::Branch { taken, not_taken, .. } => Some(vec![taken, not_taken]),
++            LaneExit::End => Some(Vec::new()),
++            LaneExit::Indirect => None,
++        }
++    };
++    let n = st.exits.len().min(p.blocks.len());
++    if (0..n).any(|b| succ(b).is_none()) {
++        return false;
++    }
++    let exec = |r: Reg| matches!(r, Reg::S(c) if c == EXEC || c == EXEC + 1);
++    let covers = |ops: &[Operand], r: Reg| {
++        let Reg::V(x) = r else { return false };
++        ops.iter().any(|op| {
++            matches!(*op, Operand::Vector { reg, dwords }
++                if (u16::from(reg)..u16::from(reg) + u16::from(dwords.max(1))).contains(&u16::from(x)))
++        })
++    };
++    // per instruction: the registers it reads for its lanes, and those it writes in full
++    let effect = |b: usize, i: usize| -> (Vec<Reg>, Vec<Reg>) {
++        let inst = &p.blocks[b].insts[i];
++        let name = inst.name();
++        let partial = name.contains("16") || name.contains("mac") || name.contains("lane")
++            || matches!(&inst.fields, Fields::Valu(v) if v.dpp.is_some() || v.sdwa.is_some());
++        // the operands it reads explicitly, where its old destination is not one of them
++        let sources: Option<Vec<Operand>> = match &inst.fields {
++            Fields::Valu(v) if !partial => Some(v.src.clone()),
++            Fields::Ds { addr, data, .. } if !partial => Some(addr.iter().copied().chain(data.iter().copied()).collect()),
++            Fields::Buffer { addr, data, .. } if !partial && !name.contains("store") && !name.contains("atomic") => {
++                let _ = data;
++                Some(vec![*addr])
++            }
++            Fields::Image { addr, .. } if !partial && !name.contains("store") && !name.contains("atomic") => {
++                Some(addr.clone())
++            }
++            _ => None,
++        };
++        let mut reads = Vec::new();
++        for &(r, _) in &inst.reads {
++            if exec(r) {
++                continue;
++            }
++            let old_only = matches!(r, Reg::V(_))
++                && inst.write(r).is_some()
++                && sources.as_ref().is_some_and(|src| !covers(src, r));
++            if !old_only {
++                reads.push(r);
++            }
++        }
++        let whole = st.guards.get(b).and_then(|g| g.get(i)).copied().flatten().is_none();
++        let kills: Vec<Reg> = if whole && (sources.is_some() || !matches!(inst.fields, Fields::Valu(_) | Fields::Ds { .. } | Fields::Buffer { .. } | Fields::Image { .. })) {
++            inst.writes.iter().map(|w| w.0).filter(|&r| !exec(r) && !(partial && matches!(r, Reg::V(_)))).collect()
++        } else {
++            Vec::new()
++        };
++        (reads, kills)
++    };
++    let mut live_in: Vec<HashSet<Reg>> = vec![HashSet::new(); n];
++    loop {
++        let mut changed = false;
++        for b in (0..n).rev() {
++            let mut live: HashSet<Reg> = HashSet::new();
++            for t in succ(b).unwrap_or_default() {
++                if let Some(l) = live_in.get(t) {
++                    live.extend(l.iter().copied());
++                }
++            }
++            for i in (0..p.blocks[b].insts.len()).rev() {
++                let (reads, kills) = effect(b, i);
++                for r in kills {
++                    live.remove(&r);
++                }
++                live.extend(reads);
++            }
++            if live != live_in[b] {
++                live_in[b] = live;
++                changed = true;
++            }
++        }
++        if !changed {
++            break;
++        }
++    }
++    let written: HashSet<Reg> = blocks
++        .iter()
++        .flat_map(|&b| p.blocks[b].insts.iter().flat_map(|i| i.writes.iter().map(|w| w.0)))
++        .filter(|&r| !exec(r))
++        .collect();
++    let mut leaks: Vec<(usize, Reg)> = Vec::new();
++    for &b in blocks {
++        for t in succ(b).unwrap_or_default() {
++            if inside.contains(&t) {
++                continue;
++            }
++            for r in &live_in[t] {
++                if written.contains(r) {
++                    leaks.push((t, *r));
++                }
++            }
++        }
++    }
++    if std::env::var_os("VICTORY_WAVE_DUMP").is_some() {
++        eprintln!(
++            "WAVE64-LDS-FLAGS blocks={blocks:?} flag={flags:?} stored={stored:?} leaks={leaks:?}"
++        );
++    }
++    leaks.is_empty()
++}
++
+ /// Masks held as numbers or constant lane sets in guards or lane branches: the lane tests its
+ /// own bit by its console lane.
+ fn lane_constant_masks(st: &Structured) -> bool {
+diff --git a/crates/victory-shader/src/emit/wave64_tests.rs b/crates/victory-shader/src/emit/wave64_tests.rs
+index 5d1557b..87ffc26 100644
+--- a/crates/victory-shader/src/emit/wave64_tests.rs
++++ b/crates/victory-shader/src/emit/wave64_tests.rs
+@@ -736,3 +736,147 @@ fn the_lanes_past_a_count_of_threads_do_not_run() {
+         }
+     }
+ }
++
++/// One console wave of 64 threads with 512 bytes of LDS. The threads clear
++/// the flag, then the threads below s0 raise it and read it back inside
++/// their branch. Every thread stores the final flag plus one at its own
++/// UAV offset. `second` adds another write in the branch after the read.
++fn flag_program(second: Option<u32>) -> NativeProgram {
++    let mut body = vec![
++        0x7E12_0280, // v_mov_b32 v9, 0
++    ];
++    body.extend_from_slice(&ds(DS_WRITE_B32, 0, 9, 9)); // ds_write_b32 v9, v9
++    let mut branch = vec![0x7E04_0281]; // v_mov_b32 v2, 1
++    branch.extend_from_slice(&ds(DS_WRITE_B32, 0, 9, 2)); // ds_write_b32 v9, v2
++    // (a scalar exit from the branch makes it blocks of their own, which only its lanes run)
++    let mut rest = ds(DS_READ_B32, 3, 9, 0).to_vec(); // ds_read_b32 v3, v9
++    if let Some(k) = second {
++        rest.push(0x7E0C_02FF); // v_mov_b32 v6, lit
++        rest.push(k);
++        rest.extend_from_slice(&ds(DS_WRITE_B32, 0, 9, 6)); // ds_write_b32 v9, v6
++    }
++    branch.extend_from_slice(&[
++        0xBF07_8001,                       // s_cmp_lg_u32 s1, 0
++        0xBF85_0000 | rest.len() as u32, // s_cbranch_scc1 past the rest
++    ]);
++    branch.extend_from_slice(&rest);
++    body.extend_from_slice(&[
++        0x7D88_0000, // v_cmp_gt_u32 vcc, s0, v0
++        0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
++        0xBF88_0000 | branch.len() as u32, // s_cbranch_execz past the branch
++    ]);
++    body.extend_from_slice(&branch);
++    body.push(0xBEFE_040C); // s_mov_b64 exec, s[12:13]
++    body.extend_from_slice(&ds(DS_READ_B32, 5, 9, 0)); // ds_read_b32 v5, v9
++    body.extend_from_slice(&[
++        0x4A0A_0A81, // v_add_nc_u32 v5, 1, v5
++        0x3402_0082, // v_lshlrev_b32 v1, 2, v0
++        0x38 << 26 | 0x1C << 18 | 1 << 12,
++        0x80 << 24 | 2 << 16 | 5 << 8 | 1, // buffer_store_dword v5, v1, s[8:11], 0 offen
++    ]);
++    let mut native = native(&body);
++    if let StageIo::Cs(cs) = &mut native.io {
++        cs.rsrc2 |= 1 << 15; // 512 bytes of LDS
++    }
++    native
++}
++
++/// DS `op vdst, addr, data0` at offset 0.
++const fn ds(op: u8, vdst: u8, addr: u8, data0: u8) -> [u32; 2] {
++    [0x36 << 26 | (op as u32) << 18, (vdst as u32) << 24 | (data0 as u32) << 8 | addr as u32]
++}
++
++const DS_WRITE_B32: u8 = 0x0D;
++const DS_READ_B32: u8 = 0x36;
++
++/// The wave size `native` lowers to on a host of 32-lane waves.
++fn flag_wave(native: &NativeProgram) -> Option<u32> {
++    let p = crate::spill::build(native).expect("build");
++    let st = structure::structure(&p).expect("structure");
++    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
++    let io = io::raise(&p, native).expect("io::raise");
++    let was = lower::TEST_HOST_WAVE.replace(Some(32));
++    let lowered = lower::lower(&lower::Parts {
++        native,
++        p: &p,
++        st: &st,
++        io: &io,
++        res: &res,
++        inputs: Vec::new(),
++        outputs: Vec::new(),
++        prims: Vec::new(),
++        mesh_stride: 0,
++    });
++    lower::TEST_HOST_WAVE.set(was);
++    lowered.expect("lower").wave_size
++}
++
++#[test]
++fn a_branch_that_only_raises_an_lds_flag_runs_in_waves_of_32() {
++    // a read that misses the other host wave's write changes nothing the branch leaves behind
++    assert_eq!(flag_wave(&flag_program(None)), Some(32));
++    // after the read the branch writes the flag again, with the same constant
++    assert_eq!(flag_wave(&flag_program(Some(1))), Some(32));
++}
++
++#[test]
++fn a_branch_that_writes_lds_two_different_values_keeps_64_lanes() {
++    // a second value after the read: what the flag ends up holding depends on what was read
++    assert_eq!(flag_wave(&flag_program(Some(2))), Some(64));
++}
++
++#[test]
++fn both_host_waves_observe_the_lds_flag_after_the_join() {
++    use windows::Win32::Graphics::Direct3D12::{
++        D3D12_FEATURE_D3D12_OPTIONS1, D3D12_FEATURE_DATA_D3D12_OPTIONS1,
++    };
++
++    let native = flag_program(Some(1));
++    let p = crate::spill::build(&native).expect("build");
++    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
++    if let Ok(mut validator) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
++        let mut dxil = shader.dxil.clone();
++        validator.validate(&mut dxil).expect("validate the split wave shader");
++    }
++    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
++    let Ok(host) = Host::new(false) else {
++        eprintln!("no SM 6.6 hardware adapter, skipping flag dispatches");
++        return;
++    };
++    let mut waves = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
++    // SAFETY: the output points at a feature structure of the specified size.
++    unsafe {
++        host.device.CheckFeatureSupport(
++            D3D12_FEATURE_D3D12_OPTIONS1,
++            (&raw mut waves).cast(),
++            size_of_val(&waves) as u32,
++        )
++    }
++    .expect("query host wave sizes");
++    if !waves.WaveOps.as_bool() || waves.WaveLaneCountMax != 32 {
++        eprintln!("not a 32-lane host, skipping flag dispatches");
++        return;
++    }
++    let (root, pso) = host.compute_pipeline(&shader).expect("create the split wave pipeline");
++    for active in [0, 1, 31, 32, 33, 63, 64] {
++        // Exercise both sides of the branch's scalar skip.
++        for skip in [0, 1] {
++            let mut ud = vec![0; shader.user_data_dwords() as usize];
++            for u in &shader.user_data {
++                if let (RootType::Constants, 0, d @ 0..=1) = (u.root, u.slot, u.dword) {
++                    ud[u.index as usize] = [active, skip][d as usize];
++                }
++            }
++            let out = host
++                .dispatch(&root, &pso, &Dispatch {
++                    roots: vec![(0, Root::Constants(ud))],
++                    views: &[View::RawUav(64)],
++                    samplers: &[],
++                    groups: [1, 1, 1],
++                })
++                .expect("dispatch the split wave pipeline");
++            assert_eq!(out[0], [1 + u32::from(active != 0); 64], "{active} active lanes, skip {skip}");
++        }
++    }
++    eprintln!("all 14 flag dispatches passed on a 32-lane hardware adapter");
++}
+-- 
+2.56.1.windows.1
+
