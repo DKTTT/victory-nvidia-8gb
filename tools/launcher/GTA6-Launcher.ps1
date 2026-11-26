@@ -111,8 +111,13 @@ function Get-SourceSignature([string]$proj) {
 # 翻译器指纹：有源码就按 victory-gpu/build.rs 的输入算（victory-shader 的源文件 + Cargo.lock 等），
 # 没有源码（预编译包）就退回 exe 内容。同一个翻译器 → 同一个指纹，重新编译不会变。
 function Get-TranslatorId([string]$proj, [string]$exe) {
+    # 缓存键含文件时间（便宜、用于失效），返回值只含内容（稳定、不会因重新编译/复制就变）
     $sig = Get-SourceSignature $proj
-    $ck = (Get-NormPath $proj) + '|' + (Get-NormPath $exe) + '|' + $sig
+    $exeSig = ''
+    if ($exe -and (Test-Path $exe)) {
+        try { $fi0 = Get-Item $exe; $exeSig = ("{0}:{1}" -f $fi0.Length, $fi0.LastWriteTimeUtc.Ticks) } catch { }
+    }
+    $ck = (Get-NormPath $proj) + '|' + (Get-NormPath $exe) + '|' + $sig + '|' + $exeSig
     if ($script:trIdCache.ContainsKey($ck)) { return $script:trIdCache[$ck] }
     if ($script:trIdCache.Count -gt 64) { $script:trIdCache.Clear() }
     $id = ''
@@ -136,7 +141,7 @@ function Get-TranslatorId([string]$proj, [string]$exe) {
     if (-not $id -and $exe -and (Test-Path $exe)) {
         try {
             $fi = Get-Item $exe
-            $id = 'exe' + (Get-StringHash ("{0}:{1}:{2}" -f $fi.Length, $fi.LastWriteTimeUtc.Ticks, (Get-FileHash $exe -Algorithm SHA256).Hash))
+            $id = 'exe' + (Get-StringHash ("{0}:{1}" -f $fi.Length, (Get-FileHash $exe -Algorithm SHA256).Hash))
         } catch { $id = '' }
     }
     $script:trIdCache[$ck] = $id
@@ -1117,15 +1122,27 @@ function Stop-ProcTree($proc) {
 }
 
 # 清理上次异常退出留下的 warm 进程（否则会和新预热抢 CPU、锁文件，启动时报 0x80070005）
+# 只清「孤儿」：父进程已经不在的。父进程还活着的说明是别人正在跑的预热，不动它（启动游戏时会被提示）
 function Clear-StaleWarmProcs {
-    $stale = @(Get-VictoryWarmProcs)
-    if ($stale.Count -eq 0) { return 0 }
-    $n = 0
-    foreach ($p in $stale) {
-        try { Stop-Process -Id ([int]$p.ProcessId) -Force -EA SilentlyContinue; $n++ } catch { }
+    $total = 0; $skipped = 0
+    for ($pass = 0; $pass -lt 3; $pass++) {
+        $warm = @(Get-VictoryWarmProcs)
+        if ($warm.Count -eq 0) { break }
+        $alive = @{}
+        foreach ($p in @(Get-CimInstance Win32_Process -EA SilentlyContinue)) { $alive[[int]$p.ProcessId] = $true }
+        $killedHere = 0
+        foreach ($p in $warm) {
+            $ppid = [int]$p.ParentProcessId
+            $parentAlive = ($ppid -ne 0) -and $alive.ContainsKey($ppid) -and ($ppid -ne $PID)
+            if ($parentAlive) { if ($pass -eq 0) { $skipped++ }; continue }
+            try { Stop-Process -Id ([int]$p.ProcessId) -Force -EA SilentlyContinue; $total++; $killedHere++ } catch { }
+        }
+        if ($killedHere -eq 0) { break }
+        Start-Sleep -Milliseconds 200
     }
-    if ($n -gt 0) { Add-Log ("已清理上次残留的 warm 进程 {0} 个" -f $n) }
-    return $n
+    if ($total -gt 0) { Add-Log ("已清理上次残留的 warm 进程 {0} 个" -f $total) }
+    if ($skipped -gt 0) { Add-Log ("另有 {0} 个 warm 进程的父进程还活着（判定为正在进行的预热，未结束）" -f $skipped) }
+    return $total
 }
 
 function Start-Warm([string]$kind) {
@@ -1136,6 +1153,13 @@ function Start-Warm([string]$kind) {
         if ($kind -ne 'pipelines' -and -not (Test-Path $rpf)) { Add-Log "找不到 $rpf"; return }
         $null = Build-Env
         [void](Clear-StaleWarmProcs)
+        $stillWarm = @(Get-VictoryWarmProcs)
+        if ($stillWarm.Count -gt 0) {
+            $pids = (($stillWarm | ForEach-Object { [int]$_.ProcessId } | Select-Object -Unique) -join ', ')
+            Add-Log ("已有预热进程在跑（PID: {0}），请先等它结束；不要同时开两个预热" -f $pids)
+            $lblStatus.Text = '已有预热在运行'
+            return
+        }
         Remove-Item $script:outLog, $script:errLog -Force -EA SilentlyContinue
         $script:posOut = 0; $script:posErr = 0; $script:warmDone = 0; $script:warmSawDone = $false
         $script:warmKind = $kind
@@ -3004,23 +3028,40 @@ $form.Add_Shown({
     }
     if ($env:GTA6_LAUNCHER_LAUNCHTEST) {
         Start-Sleep -Milliseconds 500
+        $script:launchTestState = if ($script:cacheState) { "$($script:cacheState.State)" } else { 'null' }
         Launch-Game
         $lt = New-Object System.Windows.Forms.Timer
         $lt.Interval = 75000
         $lt.Add_Tick({
             $this.Stop()
+            $lines = @()
             try {
-                $lines = @()
-                $p = Get-Process victory -EA SilentlyContinue | Select-Object -First 1
-                $lines += "gameRunning=" + $(if ($p) { 'yes' } else { 'no' })
-                if ($p) { $lines += "title=" + $p.MainWindowTitle }
-                $lines += "cacheDir=" + $script:cacheDir
-                Set-Content -Path $env:GTA6_LAUNCHER_LAUNCHTEST -Value ($lines -join "`r`n") -Encoding UTF8
-            } catch { }
+                $p = @(Get-Process victory -EA SilentlyContinue)
+                $lines += "gameRunning=" + $(if ($p.Count -gt 0) { 'yes' } else { 'no' })
+                $lines += "gameProcs=" + $p.Count
+                try { $lines += "title=" + [string]$p[0].MainWindowTitle } catch { $lines += 'title=<n/a>' }
+            } catch { $lines += ("proc ERR " + $_.Exception.Message) }
+            try { $lines += "cacheStateAtLaunch=" + $script:launchTestState } catch { }
+            try { $lines += "cacheStateNow=" + $(if ($script:cacheState) { "$($script:cacheState.State) | $($script:cacheState.Text)" } else { 'null' }) } catch { }
+            try { $lines += "status=" + $lblStatus.Text } catch { }
+            try { $lines += "cacheDir=" + $script:cacheDir } catch { }
+            try { $lines += "gameLog=" + $script:gameLog } catch { }
+            try { Set-Content -Path $env:GTA6_LAUNCHER_LAUNCHTEST -Value ($lines -join "`r`n") -Encoding UTF8 } catch { }
+            try { Set-Content -Path ($env:GTA6_LAUNCHER_LAUNCHTEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
             Get-Process victory -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-            $form.Close()
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
         })
         $lt.Start()
+        $ld = New-Object System.Windows.Forms.Timer
+        $ld.Interval = 180000
+        $ld.Add_Tick({
+            $this.Stop()
+            try { Set-Content -Path $env:GTA6_LAUNCHER_LAUNCHTEST -Value ("TIMEOUT`r`nstatus=" + $lblStatus.Text) -Encoding UTF8 } catch { }
+            try { Set-Content -Path ($env:GTA6_LAUNCHER_LAUNCHTEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+            Get-Process victory -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+        })
+        $ld.Start()
     }
     if ($env:GTA6_LAUNCHER_RACEDUMP) {
         $dumpTimer = New-Object System.Windows.Forms.Timer
@@ -3360,6 +3401,19 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             $okM = ($null -ne $found -and $found.translator -eq $trId)
             if ($okM) { $pass++ } else { $fail++ }
             $lines += ("[{0}] meta-key-normalized found={1}" -f $(if ($okM) { 'PASS' } else { 'FAIL' }), ($null -ne $found))
+
+            # --- 预编译包（没有源码）：只改 exe 时间不算变化（重新解压/复制不该判过期）
+            $proj2 = Join-Path $tmp 'proj2\prebuilt'
+            New-Item -ItemType Directory -Force -Path $proj2 | Out-Null
+            $exe2 = Join-Path $proj2 'victory.exe'
+            [System.IO.File]::WriteAllBytes($exe2, [byte[]](7..99))
+            [System.IO.File]::SetLastWriteTime($exe2, (Get-Date '2026-11-21 09:00:00'))
+            $id2 = Get-TranslatorId $proj2 $exe2
+            [System.IO.File]::SetLastWriteTime($exe2, (Get-Date '2026-11-25 09:00:00'))
+            $id3 = Get-TranslatorId $proj2 $exe2
+            $okE = ($id2 -eq $id3) -and ("$id2".StartsWith('exe')) -and ($id2 -ne '')
+            if ($okE) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] exe-id-ignores-mtime {1} vs {2}" -f $(if ($okE) { 'PASS' } else { 'FAIL' }), $id2, $id3)
 
             # --- 启动闸门：never/stale 拦（NoPrompt 下返回 false），ok/partial 放行
             $gNever = Test-LaunchCacheGate ([pscustomobject]@{ State = 'never'; Text = 't'; Details = @() }) -NoPrompt
