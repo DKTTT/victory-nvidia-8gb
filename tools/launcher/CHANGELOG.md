@@ -8,6 +8,35 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## 最近更新摘要（v1.9.1 → v1.9.9）
+
+从旧版本升上来的话看这一段就够了；每个版本的细节在下面各自的段落里。
+
+**预热（最影响体验）**
+- 跑完一次完整预热就显示「缓存就绪」，不再永远「没跑完」；之后游戏又用到新管线只作提示
+- 管线预热遇到引擎提前收尾会自动续传（最多 8 轮），并按显存配并发：本机实测从停在 137 条 → 跑完 3146 条
+- 剩下确实编不出来的单独列出「另有 N 条被驱动/引擎拒绝编译」，不影响已完成的缓存
+- 旧版 `victory.exe` 没有 `warm` / `shaders` 子命令时，选中构建就提示「该构建不支持预热」，不再白跑一趟
+- 空缓存点「预编译管线」不再被误判成「已全部编完」
+
+**启动与路径**
+- 所有目录自动扫描（游戏目录、构建根目录），缓存/存档就近生成；配置里不再内置作者的路径
+- 路径和盘符失效会自动回退并提示，不再抛 `Join-Path : 找不到驱动器`
+- 路径带空格也能用（以前 `GTA6 Xbox …` 被拆成多个参数，预热/启动一闪就退）
+
+**显卡**
+- A 卡 / N 卡都认：核显 + 独显的机器取独显；A 卡显存改读注册表（WMI 对 >4GB 会读错）
+- A 卡推荐上游主线 + Series X + 按显存给档位（≥20GB → 1440p）
+- 新增「关闭光追」开关（按 shader 哈希跳过 RT 绘制，A/N 卡通用；引擎侧只在 diag 构建生效）
+- 分辨率单选会说明这个构建认哪条路（`VICTORY_RENDER_SCALE` / `VICTORY_RESOLUTION` / 都不认）
+
+**界面**
+- 排行榜页「本地构建在榜」那行改成可横向滚动，不再被窗口边缘截断
+- 同一工程有 diag / release 两份 exe 时，默认选较新的那份
+- 下载构建时不再弹蓝色「正在写入 Web 请求」进度窗
+
+---
+
 ## [v1.9.9] - 2026-11-27
 
 ### 澄清 + 修复：①页的「渲染分辨率 / 主机模式」到底改了什么
@@ -34,6 +63,9 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+
+---
+
 ## [v1.9.8] - 2026-11-27
 
 ### 新增：关闭光追开关（A 卡 / N 卡通用）
@@ -48,6 +80,9 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 | 引擎限制 | 引擎里这段代码是 `#[cfg(feature = "diagnostics")]`——**只有 diag（诊断）构建生效**，`release` 构建会直接忽略。勾了但用 release 构建时，日志会提醒这一点 |
 
 > 想要 release 构建也生效，需要改引擎那一行 `cfg` 后重新编译；默认的 diag 构建（`cargo build --profile diag --features diagnostics`）本来就带。
+
+---
+
 
 ---
 
@@ -78,11 +113,17 @@ Usage: victory.exe run [OPTIONS] <EXE> [-- <TITLE_ARGS>...]
 
 ---
 
+
+---
+
 ## [v1.9.6] - 2026-11-27
 
 ### 修复（排行榜页那一行文字被窗口边缘截断）
 
 「本地构建在榜：xxx#11 | yyy#27 | …」原来是一个横向宽度固定的标签，构建一多就被窗口右边切掉，看不到后面几个。现在换成**可横向滚动的只读框**（高度同一行，位置不变），内容一个字不少，拖动下方滑条即可看完；点进去也能全选复制。
+
+---
+
 
 ---
 
@@ -119,11 +160,17 @@ Usage: victory.exe run [OPTIONS] <EXE> [-- <TITLE_ARGS>...]
 
 ---
 
+
+---
+
 ## [v1.9.4] - 2026-11-27
 
 ### 修复
 
 - **同一个工程有 `[diag]` 和 `[release]` 两份 exe 时，默认选较新的那份**：以前按扫描顺序先命中 diag，刚编出来的 release（比如 diag 编译失败后回退 release）不会被选中，等于还在跑旧 exe。日志现在带 profile 和时间（`默认构建: vf-nvidia [release]（11-26 23:53）`）。
+
+---
+
 
 ---
 
@@ -148,6 +195,9 @@ Usage: victory.exe run [OPTIONS] <EXE> [-- <TITLE_ARGS>...]
 |---|---|---|
 | 控制台刷 `Join-Path : 找不到驱动器。名为"E"的驱动器不存在。` | 配置里默认 `E:\gta6`，机器上只有 `D:`；`Join-Path` 对不存在的盘抛非终止错误，`try/catch` 抓不到 | 改成 `[System.IO.Path]::Combine`（纯字符串拼接，不碰文件系统）+ 盘符检测：盘不存在就回退到启动器目录下的 `gta6\`，日志提示一次可在①页改 |
 | 下载构建时弹出蓝色「正在写入 Web 请求」进度窗口 | `Invoke-WebRequest` 默认显示进度条 | `$ProgressPreference='SilentlyContinue'`，只保留日志和状态栏 |
+
+---
+
 
 ---
 
@@ -177,6 +227,9 @@ Usage: victory.exe run [OPTIONS] <EXE> [-- <TITLE_ARGS>...]
 
 - 预热记录新增 `shadersUnsupported / pipesUnsupported` 两个字段，跟着缓存目录走
 - 选择构建时会把版本、翻译器指纹、缓存状态和完整诊断一起写进日志
+
+---
+
 
 ---
 
@@ -222,6 +275,47 @@ Usage: victory.exe run [OPTIONS] <EXE> [-- <TITLE_ARGS>...]
 - 启动时清理残留 warm 进程只清「孤儿」（父进程已不在的）；父进程还活着的视为别人正在跑的预热、不动它，开新预热时会提示而不是硬抢。
 - `launcher-config.json` 不再把键位页的示例注释当成用户配置写入。
 - 版本号：脚本头部与启动日志 → v1.9.1。
+
+---
+
+
+---
+
+## [v1.9.0] - 2026-11-26
+
+### 修复
+- **legacy 包「有声音没画面」**：bat 里 `VICTORY_RESOLUTION`/`CARD_BUFFERS_MB` 写在 `victory.exe run` 之后不生效；启动器现在按构建能力补 env（legacy 用 `VICTORY_RESOLUTION`，新构建用 `RENDER_SCALE`），并统一 `VICTORY_WINDOW_PERCENT=88` 防止窗口盖满屏幕黑屏。
+- Build-Env 切换构建时清理残留 env（避免 legacy→新构建残留 RESOLUTION）。
+- 重打包 legacy 包（bat 顺序已修，原 zip 留 .bak）与 20261126b 包。
+
+### 验证
+- ENVDUMP 实测：legacy 构建 → `RESOLUTION=960x540 WINDOW_PERCENT=88`；新构建 → `RENDER_SCALE=0.5 WINDOW_PERCENT=88`
+- bat 顺序验证：`set` 行（22-24）在 `victory.exe run`（25）之前
+
+
+---
+
+## [v1.8.1] - 2026-11-26
+
+### 修复
+- **编译卡死 GUI**：编译从同步阻塞改为后台异步进程，主定时器轮询日志。
+  - 状态栏实时显示 `编译中… mm:ss | <当前编译的 crate>`
+  - 日志框每 3 秒追加最新输出行
+  - 编译期间界面完全可操作；完成后自动部署 + 刷新构建列表
+  - 失败自动重试 `cargo build --release`
+- 新增 `Stop-Compile`（可停止正在进行的编译）
+
+### 新增
+- **git submodule 支持**：检测到 `.gitmodules` 时改用 `git clone --recursive --depth 1`（ZIP 不包含子模块内容）。
+
+### 测试记录
+- 编译可行性（2/2 成功）：
+  - avatarmanz/VIctory-7900XTX：ZIP 2,216KB → 编译 1m35s → victory.exe 11.2MB
+  - Itsbatt/victory-unified：ZIP 1,461KB → 编译 1m20s → victory.exe 8MB
+  - 两个产物执行 `--version` 均输出 `victory 0.1.0`
+- submodule 仓库：LooperSalty/AnyXboxX clone --recursive 成功（third_party/tombox 1616 文件）
+- 异步编译实测：90 秒长编译期间界面定时器 tick 持续（elapsed 1→90），状态栏实时刷新
+
 
 ---
 
@@ -276,6 +370,9 @@ AMD 16GB：klbf-lab / Belobug-AMD / 7900XTX
 
 ---
 
+
+---
+
 ## [v1.7.3] - 2026-11-26
 
 ### 修复
@@ -290,6 +387,9 @@ AMD 16GB：klbf-lab / Belobug-AMD / 7900XTX
 
 ---
 
+
+---
+
 ## [v1.7.2] - 2026-11-26
 
 ### 修复（用户实机反馈）
@@ -299,6 +399,9 @@ AMD 16GB：klbf-lab / Belobug-AMD / 7900XTX
 
 ### 测试记录
 - 标准构建 17 个 + 预编译 10 个 = **27 个全部识别**。
+
+---
+
 
 ---
 
@@ -318,6 +421,9 @@ BuildRoot=Z:\nonexistent：自动兜底到 E:\gta6\work，builds=17
 
 ---
 
+
+---
+
 ## [v1.7] - 2026-11-26
 
 ### 修复
@@ -328,6 +434,9 @@ BuildRoot=Z:\nonexistent：自动兜底到 E:\gta6\work，builds=17
 ### 新增
 - **推荐项可直接拉取**：点选/双击推荐项 → 走"硬件适配检查 → Release/源码 ZIP"流程。
 - **「打开项目仓库」按钮**。
+
+---
+
 
 ---
 
@@ -344,6 +453,9 @@ BuildRoot=Z:\nonexistent：自动兜底到 E:\gta6\work，builds=17
 ### 测试记录
 - 模拟 11 次崩溃：自动归档触发（archives=1），清理后重新计数 ✅
 - 真实启动：日志正常重定向（stdout 0.8KB / stderr 1.6MB），正常退出不误报 ✅
+
+---
+
 
 ---
 
@@ -365,6 +477,9 @@ releaseAssets=0 → 自动转源码 ZIP
 
 ---
 
+
+---
+
 ## [v1.4] - 2026-11-26
 
 ### 修复
@@ -378,11 +493,17 @@ releaseAssets=0 → 自动转源码 ZIP
 
 ---
 
+
+---
+
 ## [v1.3.1] - 2026-11-26
 
 ### 修复
 - **`0x80070005`（拒绝访问）**：多开检测以前只检查"有窗口的 victory 进程"，另一个实例还在加载（窗口未出现）时拦不住，第二个实例因缓存/存档文件锁报错。
 - 现在检测**任意 victory 进程**，提示具体 PID 并拒绝启动。
+
+---
+
 
 ---
 
@@ -401,6 +522,9 @@ releaseAssets=0 → 自动转源码 ZIP
 
 ---
 
+
+---
+
 ## [v1.2] - 2026-11-26
 
 ### 新增
@@ -409,6 +533,9 @@ releaseAssets=0 → 自动转源码 ZIP
 - **本机推荐**：按硬件打分（算法细节见 v1.8.0）。
 - **本地构建在榜情况**：每个本地构建对应榜上项目及名次，白屏的 cool_fox 标注 ⚠。
 - **★ 本地最适合你的构建**：自动排除已知问题构建。
+
+---
+
 
 ---
 
@@ -433,6 +560,9 @@ releaseAssets=0 → 自动转源码 ZIP
 
 ---
 
+
+---
+
 ## 已知问题
 
 | 问题 | 说明 |
@@ -448,39 +578,11 @@ releaseAssets=0 → 自动转源码 ZIP
 
 ---
 
+
+---
+
 ## 版本命名说明
 
 - 主版本 `1.x`：启动器功能集
 - 次版本：新增功能（v1.2 排行榜、v1.3 键盘映射、v1.4 拉取构建、v1.5 Release 兜底、v1.6 崩溃记录、v1.7 排版修复、v1.8 推荐算法 v2）
 - 修订版本 `.x`：问题修复（v1.3.1 多开、v1.7.1 扫描兜底、v1.7.2 任意盘扫描、v1.7.3 盘符容错）
-## [v1.8.1] - 2026-11-26
-
-### 修复
-- **编译卡死 GUI**：编译从同步阻塞改为后台异步进程，主定时器轮询日志。
-  - 状态栏实时显示 `编译中… mm:ss | <当前编译的 crate>`
-  - 日志框每 3 秒追加最新输出行
-  - 编译期间界面完全可操作；完成后自动部署 + 刷新构建列表
-  - 失败自动重试 `cargo build --release`
-- 新增 `Stop-Compile`（可停止正在进行的编译）
-
-### 新增
-- **git submodule 支持**：检测到 `.gitmodules` 时改用 `git clone --recursive --depth 1`（ZIP 不包含子模块内容）。
-
-### 测试记录
-- 编译可行性（2/2 成功）：
-  - avatarmanz/VIctory-7900XTX：ZIP 2,216KB → 编译 1m35s → victory.exe 11.2MB
-  - Itsbatt/victory-unified：ZIP 1,461KB → 编译 1m20s → victory.exe 8MB
-  - 两个产物执行 `--version` 均输出 `victory 0.1.0`
-- submodule 仓库：LooperSalty/AnyXboxX clone --recursive 成功（third_party/tombox 1616 文件）
-- 异步编译实测：90 秒长编译期间界面定时器 tick 持续（elapsed 1→90），状态栏实时刷新
-
-## [v1.9.0] - 2026-11-26
-
-### 修复
-- **legacy 包「有声音没画面」**：bat 里 `VICTORY_RESOLUTION`/`CARD_BUFFERS_MB` 写在 `victory.exe run` 之后不生效；启动器现在按构建能力补 env（legacy 用 `VICTORY_RESOLUTION`，新构建用 `RENDER_SCALE`），并统一 `VICTORY_WINDOW_PERCENT=88` 防止窗口盖满屏幕黑屏。
-- Build-Env 切换构建时清理残留 env（避免 legacy→新构建残留 RESOLUTION）。
-- 重打包 legacy 包（bat 顺序已修，原 zip 留 .bak）与 20261126b 包。
-
-### 验证
-- ENVDUMP 实测：legacy 构建 → `RESOLUTION=960x540 WINDOW_PERCENT=88`；新构建 → `RENDER_SCALE=0.5 WINDOW_PERCENT=88`
-- bat 顺序验证：`set` 行（22-24）在 `victory.exe run`（25）之前
