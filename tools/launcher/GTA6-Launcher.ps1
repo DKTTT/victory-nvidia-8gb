@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.3
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.4
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -1659,14 +1659,19 @@ function Apply-BuildScan([string]$root, $found) {
         if ($script:hw -and $script:hw.Vendor -eq 'AMD') { $prefs = @('vf-main', 'upstream', '7900', 'unified', 'victory-main') }
         $idx = -1
         foreach ($pat in $prefs) {
-            for ($i = 0; $i -lt $found.Count; $i++) {
-                if ($found[$i].Name -match $pat) { $idx = $i; break }
+            $cand = @()
+            for ($i = 0; $i -lt $found.Count; $i++) { if ($found[$i].Name -match $pat) { $cand += $i } }
+            if ($cand.Count -gt 0) {
+                # 同一个工程有 diag / release 两份时选**较新的那个**（刚编出来的那份不该被旧 exe 顶掉）
+                $best = $cand[0]
+                foreach ($i in $cand) { try { if ($found[$i].Time -gt $found[$best].Time) { $best = $i } } catch { } }
+                $idx = $best
+                break
             }
-            if ($idx -ge 0) { break }
         }
         if ($idx -lt 0) { $idx = 0 }
         $lstBuilds.SelectedIndex = $idx
-        Add-Log ("默认构建: {0}" -f $found[$idx].Name)
+        Add-Log ("默认构建: {0} [{1}]（{2:MM-dd HH:mm}）" -f $found[$idx].Name, $found[$idx].Profile, $found[$idx].Time)
     }
 }
 
@@ -3810,5 +3815,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.3 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.4 by DKTTT'
 [void]$form.ShowDialog()
