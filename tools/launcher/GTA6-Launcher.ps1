@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.8
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.9
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -1303,6 +1303,13 @@ function Update-CacheStateLabel {
     $script:cacheState = $cache
     $ver = if ($info.Git) { "$($info.Branch)@$($info.Commit)" } else { '非 git 工程' }
     $tr = if ($trId) { "翻译器 $trId" } else { '翻译器指纹未知' }
+    # 分辨率设置能不能生效（新构建 RENDER_SCALE / 老构建 RESOLUTION / 都不认）
+    $resCap = Get-BuildResCapability $b.Exe
+    if (-not $resCap.Scale -and $resCap.Legacy) {
+        Add-Log ("分辨率: " + $resCap.Text)
+    } elseif (-not $resCap.Scale -and -not $resCap.Legacy) {
+        Add-Log ("⚠ 分辨率: " + $resCap.Text + "（换 vf-nvidia / 20261126a-b 包才有效）")
+    }
     $lblBuildInfo.Text = "已选: $($script:buildName)  |  $ver  |  $tr  |  $($cache.Text)"
     return [pscustomobject]@{ State = $cache; Info = $info; TrId = $trId; Ver = $ver; Tr = $tr; Build = $b; Cap = $cap }
 }
@@ -1397,6 +1404,26 @@ function Test-BuildSupportsRenderScale([string]$exePath) {
     } catch { return $false }
 }
 
+# 分辨率设置到底能不能生效：新构建认 VICTORY_RENDER_SCALE，老构建只认 VICTORY_RESOLUTION
+function Get-BuildResCapability([string]$exePath) {
+    $key = 'res|' + [string]$exePath
+    try {
+        if ($script:exeCapCache.ContainsKey($key)) { return $script:exeCapCache[$key] }
+        if (-not $exePath -or -not (Test-Path $exePath)) { return [pscustomobject]@{ Scale = $false; Legacy = $false; Window = $false; Text = '构建文件不存在，无法判断' } }
+        $bytes = [System.IO.File]::ReadAllBytes($exePath)
+        $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+        $scale = $text.Contains('VICTORY_RENDER_SCALE')
+        $legacy = $text.Contains('VICTORY_RESOLUTION')
+        $win = $text.Contains('VICTORY_WINDOW_PERCENT')
+        $txt = if ($scale) { '支持 VICTORY_RENDER_SCALE：分辨率单选有效' }
+               elseif ($legacy) { '只支持 VICTORY_RESOLUTION（老构建）：分辨率单选走老路径' }
+               else { '这个构建不认任何分辨率变量：①页的分辨率/主机模式对它无效' }
+        $o = [pscustomobject]@{ Scale = $scale; Legacy = $legacy; Window = $win; Text = $txt }
+        $script:exeCapCache[$key] = $o
+        return $o
+    } catch { return [pscustomobject]@{ Scale = $false; Legacy = $false; Window = $false; Text = '读不到 exe，无法判断' } }
+}
+
 function Build-Env {
     $b = $script:builds[$lstBuilds.SelectedIndex]
     $rec = $script:rec
@@ -1423,7 +1450,9 @@ function Build-Env {
     $env:VICTORY_CARD_BUFFERS_MIN_MB = '1'; $env:VICTORY_CARD_BUFFERS_MB = '1536'
     Remove-Item Env:VICTORY_RESOLUTION,Env:VICTORY_RENDER_SCALE -EA SilentlyContinue
     # 窗口大小：不要盖满屏幕（否则 flip chain 黑屏），所有构建统一 88%
-    $env:VICTORY_WINDOW_PERCENT = '88'
+    # 窗口大小：只有认这个变量的构建才设（vf-nvidia / legacy 都不认，设了也是无效变量）
+    $resCapW = Get-BuildResCapability $b.Exe
+    if ($resCapW.Window) { $env:VICTORY_WINDOW_PERCENT = '88' } else { Remove-Item Env:VICTORY_WINDOW_PERCENT -EA SilentlyContinue }
     # 按构建能力选择画面缩放方式
     $supportsScale = Test-BuildSupportsRenderScale $b.Exe
     if ($supportsScale) {
@@ -4111,6 +4140,22 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             } catch { $lines += ("  refused ERR: " + $_.Exception.Message) }
             finally { try { if (Test-Path $cR) { Remove-Item $cR -Recurse -Force -EA SilentlyContinue } } catch { } }
             if ($okR) { $pass++ } else { $fail++ }
+            # --- 分辨率能力判定：新构建认 RENDER_SCALE，老构建只认 RESOLUTION，都不认要提示
+            $capDir = Join-Path $env:TEMP ('gta6-cap-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            $okCap2 = $false
+            try {
+                New-Item -ItemType Directory -Force -Path $capDir | Out-Null
+                $newExe = Join-Path $capDir 'a.bat'; Set-Content -Path $newExe -Value "echo VICTORY_RENDER_SCALE VICTORY_RESOLUTION" -Encoding ASCII
+                $oldExe = Join-Path $capDir 'b.bat'; Set-Content -Path $oldExe -Value "echo VICTORY_RESOLUTION only" -Encoding ASCII
+                $noExe  = Join-Path $capDir 'c.bat'; Set-Content -Path $noExe -Value "echo nothing here" -Encoding ASCII
+                $cA = Get-BuildResCapability $newExe
+                $cB = Get-BuildResCapability $oldExe
+                $cC = Get-BuildResCapability $noExe
+                $okCap2 = ($cA.Scale -and $cA.Legacy) -and ($cB.Legacy -and -not $cB.Scale) -and (-not $cC.Scale -and -not $cC.Legacy) -and ($cC.Text -match '无效')
+                $lines += ("[{0}] res-capability new={1} legacy={2} none={3}" -f $(if ($okCap2) { 'PASS' } else { 'FAIL' }), $cA.Scale, $cB.Legacy, $cC.Text)
+            } catch { $lines += ("  resCap ERR: " + $_.Exception.Message) }
+            finally { try { if (Test-Path $capDir) { Remove-Item $capDir -Recurse -Force -EA SilentlyContinue } } catch { } }
+            if ($okCap2) { $pass++ } else { $fail++ }
             # --- 关光追清单：逗号/换行都能解析，只认 16 位十六进制，重复去重
             $rtTmp = Join-Path $env:TEMP ('gta6-rt-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.txt')
             try {
@@ -4217,5 +4262,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.8 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.9 by DKTTT'
 [void]$form.ShowDialog()

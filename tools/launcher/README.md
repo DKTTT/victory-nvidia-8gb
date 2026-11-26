@@ -379,3 +379,7 @@ v2 规则：
 - 清单取自构建的 `scripts\rt_off_hashes.txt`（没有就找启动器目录下的同名文件），加载了几条会写日志
 - 引擎里这段逻辑是 `diagnostics` 特性，**只在 diag 构建生效**；用 release 构建时日志会提醒
 - 取消勾选 = 正常渲染光追，不需要重新预热
+
+## v1.9.9：分辨率单选到底有没有用（现在会告诉你）
+
+实测：vf-nvidia / 20261126a-b 认 `VICTORY_RENDER_SCALE`（改渲染目标与 FSR 常量，0.2–1.0，仅 1.0.2.1）；legacy 20261125 只认 `VICTORY_RESOLUTION`（`宽x高`）；两个都不认的构建单选无效。选中构建时日志会写明走哪条路，两个都不认会直接警告。`VICTORY_WINDOW_PERCENT=88` 只对认得它的构建设置。

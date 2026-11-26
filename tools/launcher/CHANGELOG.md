@@ -8,6 +8,32 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## [v1.9.9] - 2026-11-27
+
+### 澄清 + 修复：①页的「渲染分辨率 / 主机模式」到底改了什么
+
+实测三个真实 exe（在二进制里找环境变量字符串）：
+
+| exe | `VICTORY_RENDER_SCALE` | `VICTORY_RESOLUTION` | `VICTORY_WINDOW_PERCENT` |
+|---|---|---|---|
+| vf-nvidia 系列 | ✅ | — | — |
+| 20261126a / b 分发包 | ✅ | ✅ | ✅ |
+| legacy 20261125 包 | — | ✅ | — |
+
+**结论：有用，但分两条路 —— 以前启动器不告诉你走的是哪条。**
+
+| 构建 | 单选的作用 |
+|---|---|
+| 有 `VICTORY_RENDER_SCALE` | 设 `scale = 目标高度 ÷ 基准高度`，引擎（loader）直接改标题的渲染目标与 FSR 常量；范围 0.2–1.0，且只对 1.0.2.1 主程序打补丁 |
+| 只有 `VICTORY_RESOLUTION`（legacy） | 设 `VICTORY_RESOLUTION=宽x高`（例如 960x540） |
+| 两个都没有 | 单选对它**完全无效** |
+
+- 主机模式（Series S / Series X）只是换算基准：Series S=1080、Series X=2160。同一个 540p 在 Series S 上是 scale 0.5、Series X 上是 0.25，像素数一样，差别在 upscaler 的基准
+- **选中构建时现在会检测并写日志**：`分辨率: 支持 VICTORY_RENDER_SCALE：分辨率单选有效` / `只支持 VICTORY_RESOLUTION（老构建）` / `⚠ 这个构建不认任何分辨率变量：①页的分辨率/主机模式对它无效`
+- `VICTORY_WINDOW_PERCENT=88` 只有 20261126b 认，其它构建不再设置（以前是给不认的构建也塞了一个无效变量）
+
+---
+
 ## [v1.9.8] - 2026-11-27
 
 ### 新增：关闭光追开关（A 卡 / N 卡通用）
