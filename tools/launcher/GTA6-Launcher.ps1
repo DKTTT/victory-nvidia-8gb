@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.9
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.0
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -446,6 +446,18 @@ function Save-WarmMarker([string]$cacheDir, $o) {
 
 # 缓存目录里到底有什么：shaders 的桶目录、warm-done.txt 的行（按指纹分组）、
 # 以及「本机跑图用到的管线里还有多少条没编译」（early-pipelines.txt 差集）
+# 共享读：warm 子进程运行时会独占 warm-done.txt，普通读取会抛 IOException
+function Read-TextShared([string]$path) {
+    if (-not $path -or -not (Test-Path $path)) { return '' }
+    $fs = $null; $sr = $null
+    try {
+        $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+        $sr = New-Object System.IO.StreamReader($fs)
+        return $sr.ReadToEnd()
+    } catch { return '' }
+    finally { if ($sr) { $sr.Dispose() }; if ($fs) { $fs.Dispose() } }
+}
+
 # 读 RT 清单：逗号/换行分隔，只保留 16 位十六进制（和引擎 parse_skip_hashes 的规则一致）
 function Get-RtSkipHashes([string]$file) {
     if (-not $file -or -not (Test-Path $file)) { return @() }
@@ -480,7 +492,7 @@ function Get-WarmArtifacts([string]$cacheDir, [string]$fingerprint) {
         try {
             $fi = Get-Item $wf
             $a.PipesFile = $wf; $a.PipesBytes = $fi.Length; $a.PipesTime = $fi.LastWriteTime
-            $lines = @([System.IO.File]::ReadAllLines($wf))
+            $lines = @((Read-TextShared $wf) -split "`r?`n" | Where-Object { $_ })
             $a.PipesLines = $lines.Count
             $group = @{}
             $done = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -497,7 +509,7 @@ function Get-WarmArtifacts([string]$cacheDir, [string]$fingerprint) {
             if ($fingerprint -and $group.ContainsKey($fingerprint)) { $a.FpLines = [int]$group[$fingerprint] }
             $ef = Join-Path $cacheDir 'pipelines\early-pipelines.txt'
             if ($fingerprint -and $done.Count -gt 0 -and (Test-Path $ef)) {
-                $early = @([System.IO.File]::ReadAllLines($ef))
+                $early = @((Read-TextShared $ef) -split "`r?`n" | Where-Object { $_.Trim() })
                 $a.EarlyCount = $early.Count
                 $miss = 0
                 foreach ($k in $early) { $k = $k.Trim(); if ($k -and -not $done.Contains($k)) { $miss++ } }
@@ -874,6 +886,9 @@ $progress = New-Object System.Windows.Forms.ProgressBar
 $progress.Location = New-Object System.Drawing.Point(14, 88)
 $progress.Size = New-Object System.Drawing.Size(960, 16)
 $tabRun.Controls.Add($progress)
+# 管线条数常驻显示（不用每次点「检查预热状态」）
+$lblPipeCount = New-Label '管线 - · 还差 -' 804 48 170 26 9 $Muted
+$tabRun.Controls.Add($lblPipeCount)
 $lblStatus = New-Label '就绪' 14 110 960 22 9 $Muted
 $tabRun.Controls.Add($lblStatus)
 
@@ -1017,6 +1032,7 @@ $script:warmUnsupported = ''
 $script:warmPre = $null
 $script:autoStage = 0
 $script:pipeRounds = 0
+$script:pipeTick = 0
 $script:pipeMissing = -1
 $script:warmUseJobs = $true
 $script:bgProc = $null
@@ -1275,6 +1291,34 @@ function Get-BuildWarmCapability([string]$exe) {
 }
 
 # 面板上的缓存状态：实时重算（预热完成后、启动前、点「检查预热状态」都走这里）
+# 常驻的管线条数显示（③ 页 + 状态栏）：已编 N 条、还差 M 条
+function Update-PipeCountLabel {
+    try {
+        if (-not $lblPipeCount) { return }
+        if (-not $script:cacheDir) { $lblPipeCount.Text = '管线 - · 还差 -'; return }
+        $fp = ''
+        $mk = Get-WarmMarker $script:cacheDir
+        if ($mk -and $mk.PipesFingerprint) { $fp = [string]$mk.PipesFingerprint }
+        elseif ($script:cacheState -and $script:cacheState.Fingerprint) { $fp = [string]$script:cacheState.Fingerprint }
+        $art = Get-WarmArtifacts $script:cacheDir $fp
+        $done = [int]$art.FpLines
+        $miss = [int]$art.MissingEarly
+        $refused = 0
+        if ($mk -and $mk.PipesRefused) { $refused = [int]$mk.PipesRefused }
+        # 只差那几条“驱动编不出来”的，就算编完了
+        if ($miss -gt 0 -and $miss -gt $refused) {
+            $lblPipeCount.Text = ("管线 {0} 条 · 还差 {1} 条" -f $done, $miss)
+            $lblPipeCount.ForeColor = [System.Drawing.Color]::FromArgb(230, 190, 90)
+        } elseif ($done -gt 0) {
+            $lblPipeCount.Text = if ($refused -gt 0) { ("管线 {0} 条 · 已编完（{1} 条编不出来）" -f $done, $refused) } else { ("管线 {0} 条 · 已编完" -f $done) }
+            $lblPipeCount.ForeColor = $Green
+        } else {
+            $lblPipeCount.Text = '管线 0 条 · 还没记录'
+            $lblPipeCount.ForeColor = $Muted
+        }
+    } catch { }
+}
+
 function Update-CacheStateLabel {
     if ($lstBuilds.SelectedIndex -lt 0 -or -not $script:builds) { return $null }
     $b = $script:builds[$lstBuilds.SelectedIndex]
@@ -1311,6 +1355,7 @@ function Update-CacheStateLabel {
         Add-Log ("⚠ 分辨率: " + $resCap.Text + "（换 vf-nvidia / 20261126a-b 包才有效）")
     }
     $lblBuildInfo.Text = "已选: $($script:buildName)  |  $ver  |  $tr  |  $($cache.Text)"
+    try { Update-PipeCountLabel } catch { }
     return [pscustomobject]@{ State = $cache; Info = $info; TrId = $trId; Ver = $ver; Tr = $tr; Build = $b; Cap = $cap }
 }
 
@@ -1999,6 +2044,7 @@ function Save-WarmRecord([string]$kind, $outcome, [switch]$Quiet, [switch]$NoSta
             # 只有缓存真的就绪才说“预热完成”，否则别给假安心（以前没产出也会这么写）
             $lblStatus.Text = if ($r.State.State -eq 'ok') { '预热完成 · ' + $r.State.Text } else { '预热结束：' + $r.State.Text }
             Add-Log ("预热后缓存状态: {0} | {1}" -f $r.State.State, $r.State.Text)
+        try { Update-PipeCountLabel } catch { }
             foreach ($d in $r.State.Details) { Add-Log ("  " + $d) }
         }
         return $r
@@ -3333,6 +3379,13 @@ $timer.Add_Tick({
     try { Update-BgProc } catch { Add-Log ("后台任务更新出错: " + $_.Exception.Message) }
     try { Update-BgJob } catch { }
     try { Update-Warm } catch { Add-Log ("更新出错: " + $_.Exception.Message) }
+    try {
+        $script:pipeTick = [int]$script:pipeTick + 1
+        if (($script:pipeTick % 20) -eq 0) {
+            $busy = ($script:proc -and -not $script:proc.HasExited) -or ($script:game -and -not $script:game.HasExited)
+            if (-not $busy) { Update-PipeCountLabel }
+        }
+    } catch { }
     try { Update-Compile } catch { }
     try {
         if ('KeyMap' -as [type]) {
@@ -4252,6 +4305,7 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             $lines += "dlDir=$($tbDlDir.Text.Trim())"
             $lines += ("pathNotes=" + (@($script:pathNotes) -join ' / '))
             $lines += "cacheDir=$($script:cacheDir)"
+            $lines += "pipeCountLabel=$($lblPipeCount.Text)"
             $lines += "dataDir=$($script:dataDir)"
             $lines += "marker=$(Test-Path (Join-Path $script:cacheDir $script:markerName))"
             Set-Content -Path $env:GTA6_LAUNCHER_SELFTEST -Value ($lines -join "`r`n") -Encoding UTF8
@@ -4262,5 +4316,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.9 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.10.0 by DKTTT'
 [void]$form.ShowDialog()
