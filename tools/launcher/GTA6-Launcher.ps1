@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.0
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.1
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -50,24 +50,410 @@ function Save-Cfg {
         $Cfg.Console = if ($rbAutoCon.Checked) { 'auto' } elseif ($rbSX.Checked) { 'series-x' } else { 'series-s' }
         $selH = ($heights | Where-Object { $rbResMap[$_].Checked } | Select-Object -First 1)
         $Cfg.Height = if ($rbAutoRes.Checked -or -not $selH) { 'auto' } else { "$selH" }
-        $Cfg.KeyMap = if ($txtKeyMap) { $txtKeyMap.Text } else { '' }
+        $km = if ($txtKeyMap) { $txtKeyMap.Text } else { '' }
+        # 界面上那两行示例注释不算用户配置（否则首次运行会把示例写进配置文件）
+        if ($km -and ($km.TrimStart().StartsWith('# 每行一条'))) { $km = '' }
+        $Cfg.KeyMap = $km
         $Cfg.KeyMapOn = if ($chkKeyAuto) { [bool]$chkKeyAuto.Checked } else { $false }
         $Cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigPath -Encoding UTF8
     } catch { }
 }
 
-# ---------------------------------------------------------------- 构建元数据 / 版本检测
+# ---------------------------------------------------------------- 构建元数据 / 版本检测 / 预热记录
+# v1.9.1 起，缓存是否可用不再看 exe 修改时间（重新编译后必然误判“过期”），而看三样东西：
+#   1) 预热记录 launcher-warm.json —— 写在缓存目录里（跟着缓存走，换目录/重扫工程都不会丢）
+#   2) 版本指纹 —— 翻译器源码指纹（仿 victory-gpu/build.rs 的输入）+ git commit + 显卡驱动版本
+#   3) 缓存文件本身 —— shaders 子目录、pipelines\warm-done.txt 里当前指纹的行数
 $script:metaPath = Join-Path $Root 'builds-meta.json'
+$script:markerName = 'launcher-warm.json'
+$script:trIdCache = @{}
+$script:driverVer = ''
+
+function Get-NormPath([string]$p) {
+    if (-not $p) { return '' }
+    $s = $p.Trim()
+    try { $s = [System.IO.Path]::GetFullPath($s) } catch { }
+    return $s.TrimEnd([char[]]"\/").ToLowerInvariant()
+}
+
+function Get-StringHash([string]$s) {
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($s))
+        $hex = ($h | ForEach-Object { $_.ToString('x2') }) -join ''
+        return $hex.Substring(0, 16)
+    } catch { return '' }
+}
+
+# 源码树签名（文件数+总字节+最新修改时间）+ 相关文件时间：用来判断缓存的翻译器指纹是否还新鲜
+function Get-SourceSignature([string]$proj) {
+    $parts = @()
+    $src = ''
+    if ($proj) { $src = Join-Path $proj 'crates\victory-shader\src' }
+    if ($src -and (Test-Path $src)) {
+        try {
+            $files = @(Get-ChildItem $src -Recurse -File -EA SilentlyContinue)
+            $sum = 0; $max = 0
+            foreach ($f in $files) { $sum += $f.Length; if ($f.LastWriteTimeUtc.Ticks -gt $max) { $max = $f.LastWriteTimeUtc.Ticks } }
+            $parts += ("{0}:{1}:{2}" -f $files.Count, $sum, $max)
+        } catch { }
+    }
+    foreach ($rel in @('crates\victory-shader\Cargo.toml', 'crates\victory-gpu\src\shader_cache.rs', 'Cargo.lock', 'rust-toolchain.toml')) {
+        $q = ''
+        if ($proj) { $q = Join-Path $proj $rel }
+        if ($q -and (Test-Path $q)) {
+            try { $fi = Get-Item $q; $parts += ("{0}:{1}" -f $fi.Length, $fi.LastWriteTimeUtc.Ticks) } catch { }
+        }
+    }
+    return ($parts -join '|')
+}
+
+# 翻译器指纹：有源码就按 victory-gpu/build.rs 的输入算（victory-shader 的源文件 + Cargo.lock 等），
+# 没有源码（预编译包）就退回 exe 内容。同一个翻译器 → 同一个指纹，重新编译不会变。
+function Get-TranslatorId([string]$proj, [string]$exe) {
+    $sig = Get-SourceSignature $proj
+    $ck = (Get-NormPath $proj) + '|' + (Get-NormPath $exe) + '|' + $sig
+    if ($script:trIdCache.ContainsKey($ck)) { return $script:trIdCache[$ck] }
+    if ($script:trIdCache.Count -gt 64) { $script:trIdCache.Clear() }
+    $id = ''
+    $src = ''
+    if ($proj) { $src = Join-Path $proj 'crates\victory-shader\src' }
+    if ($src -and (Test-Path $src)) {
+        try {
+            $files = @(Get-ChildItem $src -Recurse -File -EA SilentlyContinue)
+            foreach ($rel in @('crates\victory-shader\Cargo.toml', 'crates\victory-gpu\src\shader_cache.rs', 'Cargo.lock', 'rust-toolchain.toml')) {
+                $q = Join-Path $proj $rel
+                if (Test-Path $q) { $files += (Get-Item $q) }
+            }
+            $sb = New-Object System.Text.StringBuilder
+            foreach ($f in @($files | Sort-Object FullName)) {
+                try { [void]$sb.Append($f.Name).Append(':').Append($f.Length).Append(':').Append((Get-FileHash $f.FullName -Algorithm SHA256).Hash).Append("`n") } catch { }
+            }
+            $h = Get-StringHash $sb.ToString()
+            if ($h) { $id = 'src' + $h }
+        } catch { $id = '' }
+    }
+    if (-not $id -and $exe -and (Test-Path $exe)) {
+        try {
+            $fi = Get-Item $exe
+            $id = 'exe' + (Get-StringHash ("{0}:{1}:{2}" -f $fi.Length, $fi.LastWriteTimeUtc.Ticks, (Get-FileHash $exe -Algorithm SHA256).Hash))
+        } catch { $id = '' }
+    }
+    $script:trIdCache[$ck] = $id
+    return $id
+}
+
+function ConvertTo-TimeOrNull($v) {
+    if (-not $v) { return $null }
+    try { return [datetime]$v } catch { return $null }
+}
+
+# commit 可能是短 sha（7 位）也可能是完整 sha：按前缀比较，别把同一个提交判成“构建已更新”
+function Test-CommitSame([string]$a, [string]$b) {
+    if (-not $a -or -not $b) { return $true }
+    $x = $a.Trim().ToLowerInvariant()
+    $y = $b.Trim().ToLowerInvariant()
+    $n = [math]::Min($x.Length, $y.Length)
+    if ($n -lt 4) { return ($x -eq $y) }
+    return ($x.Substring(0, $n) -eq $y.Substring(0, $n))
+}
+
+function Format-TimeShort($t) {
+    if (-not $t) { return '?' }
+    return $t.ToString('MM-dd HH:mm')
+}
+
 function Get-Meta {
     if (-not (Test-Path $script:metaPath)) { return @{} }
     try {
         $raw = Get-Content $script:metaPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $h = @{}
-        foreach ($p in $raw.PSObject.Properties) { $h[$p.Name] = $p.Value }
+        foreach ($p in $raw.PSObject.Properties) {
+            $v = $p.Value
+            if ($null -eq $v) { continue }
+            $proj = $p.Name
+            try { if ($v.project) { $proj = [string]$v.project } } catch { }
+            $key = Get-NormPath $proj
+            if (-not $key) { continue }
+            # 同一工程有多条记录：留预热时间更新的那条（旧版本按不同写法存过 key）
+            if ($h.ContainsKey($key)) {
+                $old = $h[$key]
+                $tn = ConvertTo-TimeOrNull $v.prewarmTime
+                $to = ConvertTo-TimeOrNull $old.prewarmTime
+                if ($tn -and (-not $to -or $tn -gt $to)) { $h[$key] = $v }
+            } else { $h[$key] = $v }
+        }
         return $h
     } catch { return @{} }
 }
-function Save-Meta($m) { try { $m | ConvertTo-Json -Depth 6 | Set-Content -Path $script:metaPath -Encoding UTF8 } catch { } }
+
+function Save-Meta($m) {
+    try {
+        $out = @{}
+        foreach ($k in @($m.Keys)) {
+            if ($null -eq $m[$k]) { continue }
+            $out[(Get-NormPath $k)] = $m[$k]
+        }
+        $out | ConvertTo-Json -Depth 6 | Set-Content -Path $script:metaPath -Encoding UTF8
+    } catch { }
+}
+
+# 老版本 meta 只有工程路径作 key；这里做兼容查找：工程路径 → exe 路径 → 缓存目录
+function Find-MetaEntry($meta, [string]$proj, [string]$exe, [string]$cacheDir) {
+    if (-not $meta -or $meta.Count -eq 0) { return $null }
+    $p = Get-NormPath $proj
+    if ($p -and $meta.ContainsKey($p)) { return $meta[$p] }
+    $e = Get-NormPath $exe
+    $c = Get-NormPath $cacheDir
+    $byExe = $null; $byCache = $null
+    foreach ($k in @($meta.Keys)) {
+        $v = $meta[$k]
+        if ($null -eq $v) { continue }
+        if (-not $byExe -and $e) {
+            try { if ($v.exe -and ((Get-NormPath ([string]$v.exe)) -eq $e)) { $byExe = $v } } catch { }
+        }
+        if (-not $byCache -and $c) {
+            try { if ($v.cache -and ((Get-NormPath ([string]$v.cache)) -eq $c)) { $byCache = $v } } catch { }
+        }
+        if ($byExe -and $byCache) { break }
+    }
+    if ($byExe) { return $byExe }
+    if ($byCache) { return $byCache }
+    return $null
+}
+
+# 预热记录：跟着缓存目录走，换工程路径/重扫都不会读不到
+function New-WarmRecord {
+    return [pscustomobject]@{
+        Project = ''; Exe = ''; Commit = ''; Translator = ''; Driver = ''; BuildTime = ''
+        ShadersDone = $false; ShadersComplete = $false; ShadersTime = ''; ShadersCount = 0
+        PipesDone = $false; PipesComplete = $false; PipesTime = ''; PipesFingerprint = ''; PipesLines = 0
+    }
+}
+
+function Get-WarmMarker([string]$cacheDir) {
+    if (-not $cacheDir) { return $null }
+    $p = Join-Path $cacheDir $script:markerName
+    if (-not (Test-Path $p)) { return $null }
+    try {
+        $raw = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json
+        $o = New-WarmRecord
+        $o.Project = [string]$raw.project; $o.Exe = [string]$raw.exe
+        $o.Commit = [string]$raw.commit; $o.Translator = [string]$raw.translator
+        $o.Driver = [string]$raw.driver; $o.BuildTime = [string]$raw.buildTime
+        $o.ShadersDone = [bool]$raw.shadersDone; $o.ShadersTime = [string]$raw.shadersTime
+        $o.ShadersComplete = [bool]$raw.shadersComplete
+        $o.ShadersCount = [int]$raw.shadersCount
+        $o.PipesDone = [bool]$raw.pipesDone; $o.PipesTime = [string]$raw.pipesTime
+        $o.PipesComplete = [bool]$raw.pipesComplete
+        $o.PipesFingerprint = [string]$raw.pipesFingerprint; $o.PipesLines = [int]$raw.pipesLines
+        return $o
+    } catch { return $null }
+}
+
+function Save-WarmMarker([string]$cacheDir, $o) {
+    if (-not $cacheDir -or -not $o) { return }
+    try {
+        New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+        $obj = [ordered]@{
+            version        = 1
+            project        = $o.Project
+            exe            = $o.Exe
+            commit         = $o.Commit
+            translator     = $o.Translator
+            driver         = $o.Driver
+            buildTime      = $o.BuildTime
+            shadersDone    = [bool]$o.ShadersDone
+            shadersComplete = [bool]$o.ShadersComplete
+            shadersTime    = $o.ShadersTime
+            shadersCount   = [int]$o.ShadersCount
+            pipesDone      = [bool]$o.PipesDone
+            pipesComplete  = [bool]$o.PipesComplete
+            pipesTime      = $o.PipesTime
+            pipesFingerprint = $o.PipesFingerprint
+            pipesLines     = [int]$o.PipesLines
+            updated        = (Get-Date).ToString('o')
+        }
+        ($obj | ConvertTo-Json -Depth 4) | Set-Content -Path (Join-Path $cacheDir $script:markerName) -Encoding UTF8
+    } catch { }
+}
+
+# 缓存目录里到底有什么：shaders 的桶目录、warm-done.txt 的行（按指纹分组）、
+# 以及「本机跑图用到的管线里还有多少条没编译」（early-pipelines.txt 差集）
+function Get-WarmArtifacts([string]$cacheDir, [string]$fingerprint) {
+    $a = [pscustomobject]@{
+        ShaderDirs = 0; ShaderFiles = 0
+        PipesFile = ''; PipesLines = 0; PipesTime = $null; PipesBytes = 0
+        FpLines = 0; FpFirst = ''; FpLast = ''
+        EarlyCount = 0; MissingEarly = -1
+    }
+    if (-not $cacheDir) { return $a }
+    $sh = Join-Path $cacheDir 'shaders'
+    if (Test-Path $sh) {
+        try {
+            $dirs = [System.IO.Directory]::GetDirectories($sh)
+            $a.ShaderDirs = $dirs.Count
+            $n = 0
+            foreach ($d in $dirs) { $n += ([System.IO.Directory]::GetFiles($d)).Length }
+            $a.ShaderFiles = $n
+        } catch { }
+    }
+    $wf = Join-Path $cacheDir 'pipelines\warm-done.txt'
+    if (Test-Path $wf) {
+        try {
+            $fi = Get-Item $wf
+            $a.PipesFile = $wf; $a.PipesBytes = $fi.Length; $a.PipesTime = $fi.LastWriteTime
+            $lines = @([System.IO.File]::ReadAllLines($wf))
+            $a.PipesLines = $lines.Count
+            $group = @{}
+            $done = New-Object 'System.Collections.Generic.HashSet[string]'
+            foreach ($ln in $lines) {
+                $sp = $ln.IndexOf(' ')
+                if ($sp -le 0) { continue }
+                $fp = $ln.Substring(0, $sp)
+                if (-not $a.FpFirst) { $a.FpFirst = $fp }
+                $a.FpLast = $fp
+                if (-not $group.ContainsKey($fp)) { $group[$fp] = 0 }
+                $group[$fp] = $group[$fp] + 1
+                if ($fingerprint -and ($fp -eq $fingerprint)) { [void]$done.Add($ln.Substring($sp + 1).Trim()) }
+            }
+            if ($fingerprint -and $group.ContainsKey($fingerprint)) { $a.FpLines = [int]$group[$fingerprint] }
+            $ef = Join-Path $cacheDir 'pipelines\early-pipelines.txt'
+            if ($fingerprint -and $done.Count -gt 0 -and (Test-Path $ef)) {
+                $early = @([System.IO.File]::ReadAllLines($ef))
+                $a.EarlyCount = $early.Count
+                $miss = 0
+                foreach ($k in $early) { $k = $k.Trim(); if ($k -and -not $done.Contains($k)) { $miss++ } }
+                $a.MissingEarly = $miss
+            }
+        } catch { }
+    }
+    return $a
+}
+
+function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, [string]$cacheDir, [string]$commit = '', [string]$exe = '', [string]$driver = '') {
+    $trId = if ($translator) { [string]$translator } else { [string](Get-TranslatorId $proj $exe) }
+    if (-not $driver) { $driver = [string]$script:driverVer }
+    $mk = Get-WarmMarker $cacheDir
+    $meta = Get-Meta
+    $me = Find-MetaEntry $meta $proj $exe $cacheDir
+    $fp = ''
+    if ($mk -and $mk.PipesFingerprint) { $fp = [string]$mk.PipesFingerprint }
+    elseif ($me) { try { if ($me.pipesFingerprint) { $fp = [string]$me.pipesFingerprint } } catch { } }
+    $art = Get-WarmArtifacts $cacheDir $fp
+    $pipeCount = if ($fp) { [int]$art.FpLines } else { [int]$art.PipesLines }
+
+    # ---- 证据：缓存里到底有没有东西
+    $hasShaders = (([int]$art.ShaderDirs) -ge 8) -and (([int]$art.ShaderFiles) -gt 0)
+    $hasPipes = ([int]$art.PipesLines) -gt 0
+    if ($fp) { $hasPipes = $hasPipes -and (([int]$art.FpLines) -gt 0) }
+
+    # ---- 记录（marker 优先，其次旧版 meta）
+    $src = 'file'
+    $recTr = ''; $recCommit = ''; $recDriver = ''
+    $shTime = $null; $shCount = 0; $pipeTime = $null
+    $shComplete = $true; $pipesComplete = $true
+    if ($mk) {
+        $src = 'record'
+        $recTr = [string]$mk.Translator; $recCommit = [string]$mk.Commit; $recDriver = [string]$mk.Driver
+        if ($mk.ShadersDone) { $shTime = ConvertTo-TimeOrNull $mk.ShadersTime; $shCount = [int]$mk.ShadersCount }
+        if ($mk.PipesDone) { $pipeTime = ConvertTo-TimeOrNull $mk.PipesTime }
+        $shComplete = [bool]$mk.ShadersComplete
+        $pipesComplete = [bool]$mk.PipesComplete
+    } elseif ($me) {
+        $src = 'meta'
+        try { $recTr = [string]$me.translator } catch { }
+        try { $recCommit = [string]$me.commit } catch { }
+        try { $recDriver = [string]$me.driver } catch { }
+        $t = ConvertTo-TimeOrNull $me.prewarmTime
+        if ($t) { $shTime = $t; $pipeTime = $t }
+    }
+
+    $why = @()
+    if ($recTr -and $trId -and ($recTr -ne $trId)) { $why += "翻译器或构建已变化($recTr→$trId)" }
+    if ($recCommit -and $commit -and (-not (Test-CommitSame $recCommit $commit))) { $why += "构建已更新($recCommit→$commit)" }
+    if ($recDriver -and $driver -and ($recDriver -ne $driver)) { $why += "显卡驱动已更新($recDriver→$driver)" }
+
+    $details = @(
+        ("src={0}" -f $src),
+        ("build={0}" -f $(if ($exeTime) { $exeTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' })),
+        ("warmShaders={0}" -f $(if ($shTime) { $shTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' })),
+        ("warmPipes={0}" -f $(if ($pipeTime) { $pipeTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' })),
+        ("translator={0}" -f $trId),
+        ("recTranslator={0}" -f $recTr),
+        ("commit={0}" -f $commit),
+        ("recCommit={0}" -f $recCommit),
+        ("driver={0}" -f $driver),
+        ("recDriver={0}" -f $recDriver),
+        ("pipesFingerprint={0}" -f $fp),
+        ("warmDoneLines={0}" -f $art.PipesLines),
+        ("fpLines={0}" -f $art.FpLines),
+        ("missingEarly={0}" -f $art.MissingEarly),
+        ("shadersComplete={0}" -f $shComplete),
+        ("pipesComplete={0}" -f $pipesComplete),
+        ("shaderDirs={0}" -f $art.ShaderDirs),
+        ("shaderFilesProbe={0}" -f $art.ShaderFiles),
+        ("shaderCount={0}" -f $shCount),
+        ("hasShaders={0}" -f $hasShaders),
+        ("hasPipes={0}" -f $hasPipes),
+        ("cacheDir={0}" -f $cacheDir)
+    )
+    $reasonTxt = if ($why.Count -gt 0) { $why -join '，' } else { '' }
+
+    if (-not $hasShaders -and -not $hasPipes) {
+        $text = if ($why.Count -gt 0) { "缓存目录是空的（$reasonTxt），需要重新「全部预热」" } else { '从未预热过，首次启动前必须预热（点「全部预热」，约 10-40 分钟）' }
+        return [pscustomobject]@{ State = 'never'; Text = $text; Details = $details; Reasons = $why; WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+    }
+    if ($why.Count -gt 0) {
+        return [pscustomobject]@{ State = 'stale'; Text = ("⚠ {0}，缓存已失效：请重新「全部预热」" -f $reasonTxt); Details = $details; Reasons = $why; WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+    }
+    if (-not ($recTr -or $recCommit -or $recDriver)) {
+        # 旧缓存：没有版本记录，只能按文件时间判断（给 2 分钟容差）
+        $newest = $null
+        foreach ($t in @($shTime, $pipeTime, $art.PipesTime)) {
+            if ($t -and (-not $newest -or $t -gt $newest)) { $newest = $t }
+        }
+        if ($newest -and $exeTime -and ($exeTime -gt $newest.AddSeconds(120))) {
+            return [pscustomobject]@{ State = 'stale'; Text = ("⚠ 构建（{0}）比缓存（{1}）新，建议重新「全部预热」" -f (Format-TimeShort $exeTime), (Format-TimeShort $newest)); Details = $details; Reasons = @('exe 比缓存新'); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+        }
+    }
+    $when = $pipeTime
+    if (-not $when) { $when = $shTime }
+    if (-not $when) { $when = $art.PipesTime }
+    if ($hasShaders -and $hasPipes) {
+        if (([int]$art.MissingEarly) -gt 0) {
+            return [pscustomobject]@{ State = 'partial'; Text = ("管线预热未完成：还差 {0} 条（可点「预编译管线」续传）· 着色器已就绪" -f $art.MissingEarly); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+        }
+        $cnt = if ($shCount -gt 0) { "着色器 {0} 个 · " -f $shCount } elseif (([int]$art.ShaderFiles) -gt 0) { "着色器 {0} 个 · " -f $art.ShaderFiles } else { '着色器已就绪 · ' }
+        if (-not ($shComplete -and $pipesComplete)) {
+            $what = @()
+            if (-not $shComplete) { $what += '着色器' }
+            if (-not $pipesComplete) { $what += '管线' }
+            $txt = ("缓存可用（管线 {0} 条），但{1}上次没跑完：可再点「全部预热」续传" -f $pipeCount, ($what -join '、'))
+            return [pscustomobject]@{ State = 'partial'; Text = $txt; Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+        }
+        return [pscustomobject]@{ State = 'ok'; Text = ("缓存就绪（{0}管线 {1} 条 · 预热 {2}）" -f $cnt, $pipeCount, (Format-TimeShort $when)); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+    }
+    if ($hasPipes) {
+        return [pscustomobject]@{ State = 'partial'; Text = ("已预编译管线（{0} 条），着色器未预翻译：首局会编译着色器，卡顿属正常" -f $pipeCount); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+    }
+    return [pscustomobject]@{ State = 'partial'; Text = '已预翻译着色器，管线未预编译：首局首次出现的特效会顿一下'; Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+}
+
+# 预热结果判定（纯函数，便于自测）：不再依赖日志关键字
+function Get-WarmOutcome([string]$kind, $exitCode, [int]$toMake, [int]$shaderCount, [int]$preLines, [int]$postLines, [int]$preShaders, [int]$postShaders, [bool]$sawFingerprint) {
+    $codeOk = ($null -eq $exitCode) -or ("$exitCode" -eq '') -or ([string]$exitCode -eq '0')
+    $grew = ($postLines -gt $preLines) -or ($postShaders -gt $preShaders)
+    if ($kind -eq 'pipelines') {
+        if ($toMake -eq 0) { return [pscustomobject]@{ Done = $true; Complete = $true; Note = '全部管线都已编译' } }
+        if ($grew) { return [pscustomobject]@{ Done = $true; Complete = $false; Note = '已编译一部分（可续传）' } }
+        if ($codeOk -and $sawFingerprint) { return [pscustomobject]@{ Done = $true; Complete = $false; Note = '引擎报告无需再编译' } }
+        return [pscustomobject]@{ Done = $false; Complete = $false; Note = ("没有产出（退出码 {0}）" -f $(if ("$exitCode" -eq '') { '无' } else { $exitCode })) }
+    }
+    if ($codeOk -and ($shaderCount -gt 0 -or $grew)) { return [pscustomobject]@{ Done = $true; Complete = $true; Note = ("已翻译 {0} 个着色器" -f $shaderCount) } }
+    if ($grew -or $shaderCount -gt 0) { return [pscustomobject]@{ Done = $true; Complete = $false; Note = '着色器已翻译一部分（可续传）' } }
+    return [pscustomobject]@{ Done = $false; Complete = $false; Note = ("没有产出（退出码 {0}）" -f $(if ("$exitCode" -eq '') { '无' } else { $exitCode })) }
+}
 function Get-ProjectInfo([string]$proj) {
     $info = [pscustomobject]@{ Project = $proj; Git = $false; Commit = ''; Branch = ''; Remote = ''; Translator = '' }
     if (Test-Path (Join-Path $proj '.git')) {
@@ -85,28 +471,7 @@ function Get-ProjectInfo([string]$proj) {
     }
     return $info
 }
-function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, [string]$cacheDir) {
-    $meta = Get-Meta
-    $m = $meta[$proj]
-    $warmDone = Join-Path $cacheDir 'pipelines\warm-done.txt'
-    if (-not $m) {
-        # 无启动器记录：看缓存目录里有没有已有的预热结果
-        if ((Test-Path $warmDone) -and ((Get-Item $warmDone).Length -gt 0)) {
-            $wt = (Get-Item $warmDone).LastWriteTime
-            if ($exeTime -gt $wt) {
-                return [pscustomobject]@{ State = 'stale'; Text = "⚠ 构建比缓存新（缓存 {0:MM-dd HH:mm}），建议重新「全部预热」" -f $wt }
-            }
-            return [pscustomobject]@{ State = 'ok'; Text = ("检测到已有管线缓存（{0:MM-dd HH:mm}）" -f $wt) }
-        }
-        return [pscustomobject]@{ State = 'never'; Text = '从未预热过，首次启动前必须预热' }
-    }
-    $stale = $false
-    if ($m.prewarmTime) { try { if ($exeTime -gt [datetime]$m.prewarmTime) { $stale = $true } } catch { } }
-    if ($m.translator -and $translator -and ("$($m.translator)" -ne "$translator")) { $stale = $true }
-    if (-not $m.prewarmTime) { $stale = $true }
-    if ($stale) { return [pscustomobject]@{ State = 'stale'; Text = '⚠ 构建比上次预热新（或翻译器版本变了），建议重新「全部预热」' } }
-    return [pscustomobject]@{ State = 'ok'; Text = "缓存新鲜（上次预热 $($m.prewarmTime)）" }
-}
+
 
 # ---------------------------------------------------------------- 界面
 $Bg = [System.Drawing.Color]::FromArgb(24, 20, 40)
@@ -293,7 +658,8 @@ $btnWarmShaders = New-Btn '预热着色器' 14 40 160 38
 $btnWarmPipes = New-Btn '预编译管线' 184 40 160 38
 $btnWarmAll = New-Btn '全部预热' 354 40 160 38 $Accent
 $btnStop = New-Btn '停止' 524 40 100 38
-$tabRun.Controls.Add($btnWarmShaders); $tabRun.Controls.Add($btnWarmPipes); $tabRun.Controls.Add($btnWarmAll); $tabRun.Controls.Add($btnStop)
+$btnCheckCache = New-Btn '检查预热状态' 634 40 160 38
+$tabRun.Controls.Add($btnWarmShaders); $tabRun.Controls.Add($btnWarmPipes); $tabRun.Controls.Add($btnWarmAll); $tabRun.Controls.Add($btnStop); $tabRun.Controls.Add($btnCheckCache)
 
 $progress = New-Object System.Windows.Forms.ProgressBar
 $progress.Location = New-Object System.Drawing.Point(14, 88)
@@ -389,6 +755,9 @@ $form.Controls.Add($logBox)
 
 # ---------------------------------------------------------------- 状态
 $script:exe = $null
+$script:builds = @()
+$script:projInfo = $null
+$script:cacheState = $null
 $script:buildName = ''
 $script:cacheDir = ''
 $script:dataDir = ''
@@ -399,7 +768,29 @@ $script:warmKind = ''
 $script:warmDone = 0
 $script:warmTotal = 0
 $script:warmSawDone = $false
+$script:warmStartedAt = $null
+$script:warmBuild = $null
+$script:warmBuildIdx = -1
+$script:warmProj = ''
+$script:warmExe = ''
+$script:warmCacheDir = ''
+$script:warmBuildTime = $null
+$script:warmCommit = ''
+$script:warmCommitFull = ''
+$script:warmTrId = ''
+$script:warmDriver = ''
+$script:warmFp = ''
+$script:warmToMake = -1
+$script:warmKnown = 0
+$script:warmMade = 0
+$script:warmShaders = 0
+$script:warmPre = $null
 $script:autoStage = 0
+$script:bgProc = $null
+$script:bgJob = $null
+$script:updateCtx = $null
+$script:checkCtx = $null
+$script:updateCompile = $false
 $script:race = $null
 $script:raceRec = $null
 $script:mapperWanted = $false
@@ -442,9 +833,9 @@ function Detect-Hardware {
             if ($q) { $parts = $q -split ','; $nv = @{ Name = $parts[0].Trim(); VramMB = [int]($parts[1] -replace '[^\d]', ''); Driver = $parts[2].Trim() } }
         } catch { }
     }
-    $name = ''; $vendor = ''; $vramMB = 0
+    $name = ''; $vendor = ''; $vramMB = 0; $driverVer = ''
     if ($nv) {
-        $name = $nv.Name; $vramMB = $nv.VramMB
+        $name = $nv.Name; $vramMB = $nv.VramMB; $driverVer = $nv.Driver
         if ($name -match 'NVIDIA') { $vendor = 'NVIDIA' }
     } else {
         $best = $gpus | Where-Object { $_.Name -notmatch 'Microsoft Basic|Parsec|Virtual' } | Select-Object -First 1
@@ -456,11 +847,12 @@ function Detect-Hardware {
             else { $vendor = 'Other' }
             try { $vramMB = [int]([math]::Round($best.AdapterRAM / 1MB)) } catch { }
             if ($vramMB -le 0) { $vramMB = 0 }
+            try { $driverVer = [string]$best.DriverVersion } catch { }
         }
     }
     if (-not $vendor) { $vendor = 'Unknown' }
     return [pscustomobject]@{
-        GpuName = $name; Vendor = $vendor; VramMB = $vramMB
+        GpuName = $name; Vendor = $vendor; VramMB = $vramMB; Driver = $driverVer
         CpuName = $(if ($cpu) { $cpu.Name.Trim() } else { '未知' })
         CpuCores = $(if ($cpu) { $cpu.NumberOfCores } else { 0 })
         CpuThreads = $(if ($cpu) { $cpu.NumberOfLogicalProcessors } else { 0 })
@@ -499,9 +891,10 @@ function Refresh-Hw {
     Add-Log '检测硬件…'
     $hw = Detect-Hardware
     $script:hw = $hw
+    $script:driverVer = [string]$hw.Driver
     $lines = @()
     $lines += "显卡: $($hw.GpuName)"
-    $lines += "厂商: $($hw.Vendor)    显存: $([math]::Round($hw.VramMB/1024,1)) GB"
+    $lines += "厂商: $($hw.Vendor)    显存: $([math]::Round($hw.VramMB/1024,1)) GB    驱动: $($hw.Driver)"
     $lines += "CPU : $($hw.CpuName)  ($($hw.CpuCores) 核 / $($hw.CpuThreads) 线程)"
     $lines += "内存: $($hw.RamGB) GB"
     $lines += "系统: $($hw.OS)"
@@ -548,62 +941,53 @@ function Find-VictoryBuilds([string]$root) {
     return @($found | Sort-Object Exe -Unique | Sort-Object @{Expression={ if($_.Profile -in @('diag','release')){0}else{1} }}, Project, Profile)
 }
 
-function Scan-Builds {
-    $lstBuilds.Items.Clear()
-    $root = $tbBuildRoot.Text.Trim()
-    $found = @(Find-VictoryBuilds $root)
-    if ($found.Count -eq 0) {
-        Add-Log ("构建根目录 {0} 没找到构建，自动尝试其它常见目录…" -f $(if ($root) { $root } else { '(空)' }))
-        $candidates = @(
-            'E:\gta6\work',
-            'D:\gta6\work',
-            (Join-Path $env:USERPROFILE 'gta6\work'),
-            (Join-Path $Root 'work'),
-            $Root
-        )
-        $driveCands = @()
-        foreach ($d in @(Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue)) {
-            $driveCands += ($d.Name + ':\gta6\work')
-            $driveCands += ($d.Name + ':\gta6')
-        }
-        $candidates = @($candidates + $driveCands) | Where-Object { $_ -and ($_ -ne $root) } | Select-Object -Unique
-        foreach ($c in $candidates) {
-            if (-not (Test-Path $c)) { continue }
-            $tryFound = @(Find-VictoryBuilds $c)
-            Add-Log ("  尝试 {0} → {1} 个构建" -f $c, $tryFound.Count)
-            if ($tryFound.Count -gt 0) {
-                $root = $c; $found = $tryFound
-                $tbBuildRoot.Text = $c
-                Add-Log ("已自动切换到构建根目录: {0}" -f $c)
-                try { $Cfg.BuildRoot = $c } catch { }
-                break
-            }
-        }
+
+# 缓存/存档目录：按构建名约定（与游戏侧 env 一致）
+function Get-BuildDirs([string]$name) {
+    $cacheBase = $tbCacheRoot.Text.Trim()
+    $saveBase = $tbSaveRoot.Text.Trim()
+    $known = @{
+        'vf-nvidia' = @{ Cache = 'cache-nvidia'; Data = 'perf-data' }
+        'vf-main'   = @{ Cache = 'cache-upstream'; Data = 'perf-data-up' }
+        'cool_fox'  = @{ Cache = 'cache-coolfox'; Data = 'perf-data-cool' }
     }
-    if ($found.Count -eq 0) {
-        Add-Log ("没有找到任何 victory.exe。请在「构建根目录」选择含 */target/diag|release/victory.exe 的目录（当前: {0}）" -f $root)
-        try { [System.Windows.Forms.MessageBox]::Show(("没有扫描到任何 victory.exe。`r`n`r`n当前构建根目录：{0}`r`n`r`n请点「构建根目录」旁的「浏览…」选择包含以下结构的目录：`r`n  工程名\target\diag\victory.exe`r`n  工程名\target\release\victory.exe" -f $root), '未找到本地构建', 'OK', 'Warning') } catch { }
-        return
+    if ($known.ContainsKey($name)) {
+        return @{ Cache = (Join-Path $cacheBase $known[$name].Cache); Data = (Join-Path $saveBase $known[$name].Data) }
     }
-    foreach ($f in $found) {
-        $lstBuilds.Items.Add(('{0}  [{1}]  {2} MB  {3:MM-dd HH:mm}' -f $f.Name, $f.Profile, $f.SizeMB, $f.Time)) | Out-Null
-    }
-    $script:builds = $found
-    Add-Log ("扫描到 {0} 个本地构建" -f $found.Count)
-    if ($lstBuilds.Items.Count -gt 0) {
-        $pref = 'vf-main'
-        if ($script:hw) {
-            if ($script:hw.Vendor -eq 'NVIDIA') { $pref = 'vf-nvidia|nvidia' }
-            elseif ($script:hw.Vendor -eq 'AMD') { $pref = 'vf-main|upstream|7900' }
+    return @{ Cache = (Join-Path $cacheBase ("cache-" + $name)); Data = (Join-Path $saveBase ("perf-data-" + $name)) }
+}
+
+# 面板上的缓存状态：实时重算（预热完成后、启动前、点「检查预热状态」都走这里）
+function Update-CacheStateLabel {
+    if ($lstBuilds.SelectedIndex -lt 0 -or -not $script:builds) { return $null }
+    $b = $script:builds[$lstBuilds.SelectedIndex]
+    $dirs = Get-BuildDirs $b.Name
+    $script:cacheDir = $dirs.Cache
+    $script:dataDir = $dirs.Data
+    $info = Get-ProjectInfo $b.Project
+    $script:projInfo = $info
+    $trId = Get-TranslatorId $b.Project $b.Exe
+    $cache = Get-CacheState $b.Project $b.Time $trId $script:cacheDir $info.Commit $b.Exe $script:driverVer
+    $script:cacheState = $cache
+    $ver = if ($info.Git) { "$($info.Branch)@$($info.Commit)" } else { '非 git 工程' }
+    $tr = if ($trId) { "翻译器 $trId" } else { '翻译器指纹未知' }
+    $lblBuildInfo.Text = "已选: $($script:buildName)  |  $ver  |  $tr  |  $($cache.Text)"
+    return [pscustomobject]@{ State = $cache; Info = $info; TrId = $trId; Ver = $ver; Tr = $tr; Build = $b }
+}
+
+function Test-CacheStateNow {
+    try {
+        if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        $r = Update-CacheStateLabel
+        if (-not $r) { return }
+        $cs = $r.State
+        Add-Log ("检查预热状态: {0} | {1}" -f $cs.State, $cs.Text)
+        foreach ($d in $cs.Details) { Add-Log ("  " + $d) }
+        $lblStatus.Text = $cs.Text
+        if ($cs.State -eq 'never' -or $cs.State -eq 'stale') {
+            Add-Log '建议：点「全部预热」（着色器 → 管线），完成后这里会显示“缓存就绪”'
         }
-        $idx = -1
-        for ($i = 0; $i -lt $found.Count; $i++) {
-            if ($found[$i].Name -match $pref) { $idx = $i; break }
-        }
-        if ($idx -lt 0) { $idx = 0 }
-        $lstBuilds.SelectedIndex = $idx
-        Add-Log ("默认构建: {0}" -f $found[$idx].Name)
-    }
+    } catch { Add-Log ("检查预热状态失败: " + $_.Exception.Message) }
 }
 
 function Select-Build {
@@ -612,31 +996,16 @@ function Select-Build {
     $script:exe = $b.Exe
     $script:buildName = "$($b.Name) [$($b.Profile)]"
     $script:skipFile = Join-Path $b.Project 'scripts\rt_off_hashes.txt'
-    # 缓存/存档目录：优先用构建根下的约定目录
-    $cacheBase = $tbCacheRoot.Text.Trim()
-    $saveBase = $tbSaveRoot.Text.Trim()
-    $known = @{
-        'vf-nvidia' = @{ Cache = 'cache-nvidia'; Data = 'perf-data' }
-        'vf-main'   = @{ Cache = 'cache-upstream'; Data = 'perf-data-up' }
-        'cool_fox'  = @{ Cache = 'cache-coolfox'; Data = 'perf-data-cool' }
-    }
-    if ($known.ContainsKey($b.Name)) {
-        $script:cacheDir = Join-Path $cacheBase $known[$b.Name].Cache
-        $script:dataDir = Join-Path $saveBase $known[$b.Name].Data
-    } else {
-        $script:cacheDir = Join-Path $cacheBase ("cache-" + $b.Name)
-        $script:dataDir = Join-Path $saveBase ("perf-data-" + $b.Name)
-    }
+    $dirs = Get-BuildDirs $b.Name
+    $script:cacheDir = $dirs.Cache
+    $script:dataDir = $dirs.Data
     New-Item -ItemType Directory -Force -Path $script:cacheDir, $script:dataDir -EA SilentlyContinue | Out-Null
-    $info = Get-ProjectInfo $b.Project
-    $script:projInfo = $info
-    $cache = Get-CacheState $b.Project $b.Time $info.Translator $script:cacheDir
-    $script:cacheState = $cache
-    $ver = if ($info.Git) { "$($info.Branch)@$($info.Commit)" } else { '非 git 工程' }
-    $tr = if ($info.Translator) { "翻译器 v$($info.Translator)" } else { '翻译器版本未知' }
-    $lblBuildInfo.Text = "已选: $($script:buildName)  |  $ver  |  $tr  |  $($cache.Text)"
     Add-Log ("选中构建: {0} -> {1}" -f $script:buildName, $b.Exe)
-    Add-Log ("  版本: {0}  {1}  {2}" -f $ver, $tr, $cache.Text)
+    $r = Update-CacheStateLabel
+    if ($r) {
+        Add-Log ("  版本: {0}  {1}  {2}" -f $r.Ver, $r.Tr, $r.State.Text)
+        foreach ($d in $r.State.Details) { Add-Log ("  " + $d) }
+    }
 }
 
 # ---------------------------------------------------------------- 环境与启动
@@ -700,6 +1069,65 @@ function Build-Env {
     return @{ Console = $console; Height = $height; Scale = $scale; Legacy = (-not $supportsScale) }
 }
 
+# 结束进程树：.NET Framework 的 Process.Kill 没有“整棵树”重载，
+# 而 victory warm 会自己再开一堆 victory warm --these 子进程（占满 CPU、锁住缓存文件）
+function Get-VictoryProcs {
+    try { return @(Get-CimInstance Win32_Process -Filter "Name='victory.exe'" -EA SilentlyContinue) } catch { return @() }
+}
+
+function Get-VictoryWarmProcs {
+    $out = @()
+    foreach ($p in (Get-VictoryProcs)) {
+        $cl = ''
+        try { $cl = [string]$p.CommandLine } catch { }
+        if ($cl -match '\bwarm\b') { $out += $p }
+    }
+    return $out
+}
+
+function Stop-ProcTree($proc) {
+    if (-not $proc) { return 0 }
+    $killed = 0
+    try {
+        $rootId = [int]$proc.Id
+        $all = @(Get-CimInstance Win32_Process -EA SilentlyContinue)
+        $kids = @{}
+        foreach ($p in $all) {
+            $pp = [int]$p.ParentProcessId
+            if (-not $kids.ContainsKey($pp)) { $kids[$pp] = @() }
+            $kids[$pp] += [int]$p.ProcessId
+        }
+        $victims = @()
+        $stack = @($rootId)
+        while ($stack.Count -gt 0) {
+            $cur = [int]$stack[0]
+            if ($stack.Count -gt 1) { $stack = @($stack[1..($stack.Count - 1)]) } else { $stack = @() }
+            if ($kids.ContainsKey($cur)) {
+                foreach ($c in $kids[$cur]) {
+                    if ($victims -notcontains $c) { $victims += $c; $stack += $c }
+                }
+            }
+        }
+        foreach ($v in $victims) { try { Stop-Process -Id $v -Force -EA SilentlyContinue; $killed++ } catch { } }
+        try { $proc.Kill() } catch { }
+        try { Stop-Process -Id $rootId -Force -EA SilentlyContinue } catch { }
+        if ($victims.Count -gt 0) { try { Wait-Process -Id $victims -Timeout 5 -EA SilentlyContinue } catch { } }
+    } catch { }
+    return $killed
+}
+
+# 清理上次异常退出留下的 warm 进程（否则会和新预热抢 CPU、锁文件，启动时报 0x80070005）
+function Clear-StaleWarmProcs {
+    $stale = @(Get-VictoryWarmProcs)
+    if ($stale.Count -eq 0) { return 0 }
+    $n = 0
+    foreach ($p in $stale) {
+        try { Stop-Process -Id ([int]$p.ProcessId) -Force -EA SilentlyContinue; $n++ } catch { }
+    }
+    if ($n -gt 0) { Add-Log ("已清理上次残留的 warm 进程 {0} 个" -f $n) }
+    return $n
+}
+
 function Start-Warm([string]$kind) {
     try {
         if ($script:proc -and -not $script:proc.HasExited) { Add-Log '预热已在运行'; return }
@@ -707,15 +1135,33 @@ function Start-Warm([string]$kind) {
         $rpf = Join-Path $tbGame.Text.Trim() 'shaders.rpf'
         if ($kind -ne 'pipelines' -and -not (Test-Path $rpf)) { Add-Log "找不到 $rpf"; return }
         $null = Build-Env
+        [void](Clear-StaleWarmProcs)
         Remove-Item $script:outLog, $script:errLog -Force -EA SilentlyContinue
         $script:posOut = 0; $script:posErr = 0; $script:warmDone = 0; $script:warmSawDone = $false
         $script:warmKind = $kind
         $procArgs = if ($kind -eq 'pipelines') { @('warm', '--used') } else { @('shaders', $rpf) }
         $script:warmTotal = if ($kind -eq 'pipelines') { 2400 } else { 26000 }
+        # 预热过程中用户可能切构建：把这次预热对应的构建/版本固定下来
+        $bb = $script:builds[$lstBuilds.SelectedIndex]
+        $script:warmBuildIdx = $lstBuilds.SelectedIndex
+        $script:warmBuild = $bb
+        $script:warmProj = $bb.Project
+        $script:warmExe = $bb.Exe
+        $script:warmCacheDir = $script:cacheDir
+        $script:warmBuildTime = $bb.Time
+        $script:warmCommit = if ($script:projInfo) { [string]$script:projInfo.Commit } else { '' }
+        $script:warmCommitFull = ''
+        try { $script:warmCommitFull = [string](& git -C $bb.Project rev-parse HEAD 2>$null | Select-Object -First 1) } catch { }
+        $script:warmTrId = Get-TranslatorId $bb.Project $bb.Exe
+        $script:warmDriver = [string]$script:driverVer
+        $script:warmStartedAt = Get-Date
+        $script:warmFp = ''; $script:warmToMake = -1; $script:warmKnown = 0; $script:warmMade = 0; $script:warmShaders = 0
+        $script:warmPre = Get-WarmArtifacts $script:warmCacheDir ''
         $lblStatus.Text = if ($kind -eq 'pipelines') { '正在预编译管线…' } else { '正在预翻译着色器…' }
         $script:proc = Start-Process -FilePath $script:exe -ArgumentList $procArgs -WorkingDirectory (Split-Path $script:exe) `
             -RedirectStandardOutput $script:outLog -RedirectStandardError $script:errLog -PassThru -WindowStyle Hidden
-        Add-Log ("预热[{0}] PID={1}" -f $kind, $script:proc.Id)
+        Add-Log ("预热[{0}] PID={1} 缓存={2}" -f $kind, $script:proc.Id, $script:warmCacheDir)
+        Add-Log ("  构建: {0} 版本={1} 翻译器={2} 驱动={3}" -f $bb.Name, $script:warmCommit, $script:warmTrId, $script:warmDriver)
         $btnWarmAll.Enabled = $false; $btnWarmShaders.Enabled = $false; $btnWarmPipes.Enabled = $false
         $btnStop.Enabled = $true; $btnLaunch.Enabled = $false
         $progress.Value = 0
@@ -740,6 +1186,328 @@ function Read-Log([string]$path, [ref]$pos) {
     } catch { return @() }
 }
 
+# ---------------------------------------------------------------- 后台任务（更新/检查更新/扫描，不卡界面）
+# 两种：外部程序（git，边跑边把 stderr 进度打进日志）和 PowerShell 作业（网络请求、目录扫描）
+$script:bgProc = $null
+$script:bgJob = $null
+
+function Test-BgBusy {
+    if ($script:bgProc) { Add-Log ("已有后台任务在跑（{0}），请等它结束" -f $script:bgProc.Name); return $true }
+    if ($script:bgJob) { Add-Log ("已有后台任务在跑（{0}），请等它结束" -f $script:bgJob.Name); return $true }
+    return $false
+}
+
+function Start-BgProc([string]$name, [string]$file, [string[]]$argList, [string]$workDir, [scriptblock]$onDone) {
+    if (Test-BgBusy) { return $false }
+    try {
+        $lo = Join-Path $env:TEMP ("gta6-bg-" + (Get-Date -Format 'HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,4) + '.out.log')
+        $le = $lo + '.err.log'
+        Remove-Item $lo, $le -EA SilentlyContinue
+        $p = Start-Process -FilePath $file -ArgumentList $argList -WorkingDirectory $(if ($workDir) { $workDir } else { $Root }) `
+            -RedirectStandardOutput $lo -RedirectStandardError $le -PassThru -WindowStyle Hidden
+        $script:bgProc = [pscustomobject]@{
+            Name = $name; Proc = $p; LogOut = $lo; LogErr = $le; PosOut = 0; PosErr = 0
+            OnDone = $onDone; Start = Get-Date; Shown = 0; Text = (New-Object System.Text.StringBuilder)
+        }
+        Add-Log ("{0}：已在后台执行（界面不会卡，日志实时显示）" -f $name)
+        $lblStatus.Text = ("{0}…（可继续操作界面）" -f $name)
+        return $true
+    } catch {
+        Add-Log ("{0} 启动失败: {1}" -f $name, $_.Exception.Message)
+        return $false
+    }
+}
+
+# 注意：PowerShell 5.1 里带 -RedirectStandard* 的 Start-Process 拿不到 ExitCode（总是空），
+# 所以判断成败用「输出文本 + 命令自己的副作用」，OnDone 会同时收到 (退出码, 全部输出文本)
+function Update-BgProc {
+    $t = $script:bgProc
+    if (-not $t) { return }
+    try {
+        $lines = @()
+        $lines += Read-Log $t.LogOut ([ref]$t.PosOut)
+        $lines += Read-Log $t.LogErr ([ref]$t.PosErr)
+        foreach ($l in $lines) {
+            $s = "$l".Trim()
+            if ($s) { [void]$t.Text.AppendLine($s); Add-Log ('  │ ' + $s) }
+        }
+        $elapsed = [int]((Get-Date) - $t.Start).TotalSeconds
+        $lblStatus.Text = ("{0}… {1:00}:{2:00}（界面可正常操作）" -f $t.Name, [math]::Floor($elapsed / 60), ($elapsed % 60))
+        if ($t.Proc.HasExited) {
+            $code = $null
+            try { $null = $t.Proc.WaitForExit(2000); $code = $t.Proc.ExitCode } catch { }
+            try {
+                $tail = @()
+                $tail += Read-Log $t.LogOut ([ref]$t.PosOut)
+                $tail += Read-Log $t.LogErr ([ref]$t.PosErr)
+                foreach ($l in $tail) { $s = "$l".Trim(); if ($s) { [void]$t.Text.AppendLine($s); Add-Log ('  │ ' + $s) } }
+            } catch { }
+            $script:bgProc = $null
+            $text = ''
+            try { $text = $t.Text.ToString() } catch { }
+            Add-Log ("{0} 结束（退出码 {1}，用时 {2}s）" -f $t.Name, $(if ("$code" -eq '') { '未知' } else { $code }), $elapsed)
+            if ($t.OnDone) { & $t.OnDone $code $text }
+        }
+    } catch { }
+}
+
+function Start-BgJob([string]$name, [scriptblock]$worker, [object[]]$arguments, [scriptblock]$onDone) {
+    if (Test-BgBusy) { return $false }
+    try {
+        $j = $null
+        if ($arguments -and $arguments.Count -gt 0) {
+            $j = Start-Job -Name ('gta6-' + [guid]::NewGuid().ToString('N').Substring(0,6)) -ScriptBlock $worker -ArgumentList $arguments
+        } else {
+            $j = Start-Job -Name ('gta6-' + [guid]::NewGuid().ToString('N').Substring(0,6)) -ScriptBlock $worker
+        }
+        $script:bgJob = [pscustomobject]@{ Name = $name; Job = $j; OnDone = $onDone; Start = Get-Date }
+        Add-Log ("{0}：已在后台执行（界面不会卡）" -f $name)
+        $lblStatus.Text = ("{0}…（可继续操作界面）" -f $name)
+        return $true
+    } catch {
+        Add-Log ("{0} 启动失败: {1}" -f $name, $_.Exception.Message)
+        return $false
+    }
+}
+
+function Update-BgJob {
+    $t = $script:bgJob
+    if (-not $t) { return }
+    try {
+        $elapsed = [int]((Get-Date) - $t.Start).TotalSeconds
+        $lblStatus.Text = ("{0}… {1:00}:{2:00}（界面可正常操作）" -f $t.Name, [math]::Floor($elapsed / 60), ($elapsed % 60))
+        $state = ''
+        try { $state = [string]$t.Job.State } catch { $state = 'Unknown' }
+        if ($state -eq 'Running' -or $state -eq 'NotStarted') { return }
+        $out = @()
+        try { $out = @(Receive-Job -Job $t.Job -EA SilentlyContinue) } catch { }
+        $script:bgJob = $null
+        try { Remove-Job -Job $t.Job -Force -EA SilentlyContinue } catch { }
+        Add-Log ("{0} 结束（{1}，用时 {2}s）" -f $t.Name, $state, $elapsed)
+        if ($t.OnDone) { & $t.OnDone $out $state }
+    } catch { }
+}
+
+# 后台扫描构建：整个发现过程（含回退目录）放进作业，回来只填列表
+# 注意：作业里没有主脚本的函数，所以扫描逻辑在 worker 里自带一份（与 Find-VictoryBuilds 保持一致）
+function Scan-Builds([switch]$Async) {
+    $root = $tbBuildRoot.Text.Trim()
+    if (-not $Async) {
+        $found = @(Find-VictoryBuilds $root)
+        if ($found.Count -eq 0) {
+            Add-Log ("构建根目录 {0} 没找到构建，自动尝试其它常见目录…" -f $(if ($root) { $root } else { '(空)' }))
+            $candidates = @(
+                'E:\gta6\work',
+                'D:\gta6\work',
+                (Join-Path $env:USERPROFILE 'gta6\work'),
+                (Join-Path $Root 'work'),
+                $Root
+            )
+            $driveCands = @()
+            foreach ($d in @(Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue)) {
+                $driveCands += ($d.Name + ':\gta6\work')
+                $driveCands += ($d.Name + ':\gta6')
+            }
+            $candidates = @($candidates + $driveCands) | Where-Object { $_ -and ($_ -ne $root) } | Select-Object -Unique
+            foreach ($c in $candidates) {
+                if (-not (Test-Path $c)) { continue }
+                $tryFound = @(Find-VictoryBuilds $c)
+                Add-Log ("  尝试 {0} → {1} 个构建" -f $c, $tryFound.Count)
+                if ($tryFound.Count -gt 0) {
+                    $root = $c; $found = $tryFound
+                    $tbBuildRoot.Text = $c
+                    Add-Log ("已自动切换到构建根目录: {0}" -f $c)
+                    try { $Cfg.BuildRoot = $c } catch { }
+                    break
+                }
+            }
+        }
+        Apply-BuildScan $root $found
+        return
+    }
+    # ---- 异步：目录扫描放到后台作业里，界面不卡
+    $candidates = @(
+        'E:\gta6\work',
+        'D:\gta6\work',
+        (Join-Path $env:USERPROFILE 'gta6\work'),
+        (Join-Path $Root 'work'),
+        $Root
+    )
+    $driveCands = @()
+    foreach ($d in @(Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue)) {
+        $driveCands += ($d.Name + ':\gta6\work')
+        $driveCands += ($d.Name + ':\gta6')
+    }
+    $candidates = @($candidates + $driveCands) | Where-Object { $_ -and ($_ -ne $root) } | Select-Object -Unique
+    $worker = {
+        param($root, $cands)
+        $scan = {
+            param($r)
+            $out = @()
+            if (-not $r -or -not (Test-Path $r)) { return @() }
+            foreach ($pf in @('diag', 'release')) {
+                foreach ($f in @(Get-ChildItem $r -Recurse -Depth 6 -Filter 'victory.exe' -EA SilentlyContinue)) {
+                    if ($f.FullName -match "\\target\\$pf\\victory\.exe$") {
+                        $proj = $f.FullName -replace "\\target\\$pf\\victory\.exe$", ''
+                        $out += [pscustomobject]@{
+                            Name = (Split-Path $proj -Leaf); Project = $proj; Exe = $f.FullName
+                            Profile = $pf; SizeMB = [math]::Round($f.Length / 1MB, 1); Time = $f.LastWriteTime
+                        }
+                    }
+                }
+            }
+            foreach ($f in @(Get-ChildItem $r -Recurse -Depth 6 -Filter 'victory*.exe' -EA SilentlyContinue)) {
+                if ($f.FullName -match '\\target\\' -or $f.FullName -match '\\deps\\' -or $f.Name -match 'launcher') { continue }
+                $proj = Split-Path $f.FullName -Parent
+                $out += [pscustomobject]@{
+                    Name = (Split-Path $proj -Leaf); Project = $proj; Exe = $f.FullName
+                    Profile = 'exe'; SizeMB = [math]::Round($f.Length / 1MB, 1); Time = $f.LastWriteTime
+                }
+            }
+            return @($out | Sort-Object Exe -Unique | Sort-Object @{Expression = { if ($_.Profile -in @('diag', 'release')) { 0 } else { 1 } }}, Project, Profile)
+        }
+        $found = @(& $scan $root)
+        $used = $root
+        $tried = @()
+        if ($found.Count -eq 0) {
+            foreach ($c in $cands) {
+                if (-not $c -or -not (Test-Path $c)) { continue }
+                $t = @(& $scan $c)
+                $tried += ("{0}→{1}" -f $c, $t.Count)
+                if ($t.Count -gt 0) { $found = $t; $used = $c; break }
+            }
+        }
+        [pscustomobject]@{ Root = $used; Found = $found; Tried = $tried }
+    }
+    [void](Start-BgJob '扫描本地构建' $worker @($root, $candidates) {
+        param($out, $state)
+        try {
+            $r = @($out | Where-Object { $null -ne $_ }) | Select-Object -Last 1
+            if (-not $r) { Add-Log '扫描没有返回结果（作业可能出错）'; return }
+            foreach ($t in @($r.Tried)) { if ($t) { Add-Log ("  尝试 {0}" -f $t) } }
+            if ($r.Root -and $r.Root -ne $tbBuildRoot.Text.Trim()) {
+                $tbBuildRoot.Text = $r.Root
+                try { $Cfg.BuildRoot = $r.Root } catch { }
+                Add-Log ("已自动切换到构建根目录: {0}" -f $r.Root)
+            }
+            Apply-BuildScan $r.Root @($r.Found)
+        } catch { Add-Log ("扫描结果处理失败: " + $_.Exception.Message) }
+    })
+}
+
+function Apply-BuildScan([string]$root, $found) {
+    $found = @($found)
+    $lstBuilds.Items.Clear()
+    if ($found.Count -eq 0) {
+        Add-Log ("没有找到任何 victory.exe。请在「构建根目录」选择含 */target/diag|release/victory.exe 的目录（当前: {0}）" -f $root)
+        $lblStatus.Text = '没找到本地构建（检查「构建根目录」）'
+        return
+    }
+    foreach ($f in $found) {
+        try {
+            $t = $f.Time
+            if ($t -isnot [datetime]) { try { $t = [datetime]$t } catch { $t = Get-Date } }
+            $lstBuilds.Items.Add(('{0}  [{1}]  {2} MB  {3:MM-dd HH:mm}' -f $f.Name, $f.Profile, $f.SizeMB, $t)) | Out-Null
+        } catch { Add-Log ("构建条目格式异常: " + $_.Exception.Message) }
+    }
+    $script:builds = $found
+    Add-Log ("扫描到 {0} 个本地构建" -f $found.Count)
+    if ($lstBuilds.Items.Count -gt 0) {
+        $pref = 'vf-main'
+        if ($script:hw) {
+            if ($script:hw.Vendor -eq 'NVIDIA') { $pref = 'vf-nvidia|nvidia' }
+            elseif ($script:hw.Vendor -eq 'AMD') { $pref = 'vf-main|upstream|7900' }
+        }
+        $idx = -1
+        for ($i = 0; $i -lt $found.Count; $i++) {
+            if ($found[$i].Name -match $pref) { $idx = $i; break }
+        }
+        if ($idx -lt 0) { $idx = 0 }
+        $lstBuilds.SelectedIndex = $idx
+        Add-Log ("默认构建: {0}" -f $found[$idx].Name)
+    }
+}
+
+# 从引擎日志里取信息（引擎输出可能变，取到了就当补充，取不到也不影响判定）
+function Read-WarmLine([string]$line) {
+    if ($line -match '(\d+)\s+pipelines known,\s*(\d+)\s+made before\s*\(([0-9a-fA-F]+)\),\s*(\d+)\s+bad;\s*(\d+)\s+to make') {
+        $script:warmKnown = [int]$matches[1]
+        $script:warmFp = $matches[3]
+        $script:warmToMake = [int]$matches[5]
+        $script:warmSawDone = $true
+        return
+    }
+    if ($line -match '(\d+)\s+made in\s+[0-9.]+\s*s') { $script:warmMade = [int]$matches[1]; $script:warmSawDone = $true; return }
+    if ($line -match '(\d+)\s+of\s+(\d+),\s+(\d+)\s*s') { $script:warmDone = [int]$matches[1]; $script:warmTotal = [int]$matches[2]; return }
+    if ($line -match '(\d+)\s+shaders in the cache') {
+        $script:warmShaders = [int]$matches[1]
+        $script:warmDone = $script:warmShaders
+        if ($script:warmTotal -lt $script:warmShaders) { $script:warmTotal = $script:warmShaders }
+        $script:warmSawDone = $true
+        return
+    }
+}
+
+# 写预热记录（marker，跟着缓存目录走）+ 兼容旧版 meta；然后立即重算并刷新界面
+function Save-WarmRecord([string]$kind, $outcome, [switch]$Quiet) {
+    try {
+        $cacheDir = $script:warmCacheDir
+        if (-not $cacheDir) { return $null }
+        $mk = Get-WarmMarker $cacheDir
+        if (-not $mk) { $mk = New-WarmRecord }
+        $mk.Project = [string]$script:warmProj
+        $mk.Exe = [string]$script:warmExe
+        $mk.Commit = if ($script:warmCommitFull) { [string]$script:warmCommitFull } else { [string]$script:warmCommit }
+        $mk.Translator = [string]$script:warmTrId
+        $mk.Driver = [string]$script:warmDriver
+        if ($script:warmBuildTime) { $mk.BuildTime = $script:warmBuildTime.ToString('o') }
+        $now = (Get-Date).ToString('o')
+        if ($kind -eq 'pipelines') {
+            $post = Get-WarmArtifacts $cacheDir $script:warmFp
+            $mk.PipesDone = [bool]$outcome.Done
+            $mk.PipesTime = $now
+            $mk.PipesFingerprint = [string]$script:warmFp
+            $mk.PipesLines = [int]$post.PipesLines
+            # 只有这次真的全部编译完才算完成；之前完成过的不降级
+            if ([bool]$outcome.Complete) { $mk.PipesComplete = $true }
+        } else {
+            $mk.ShadersDone = [bool]$outcome.Done
+            $mk.ShadersTime = $now
+            if ($script:warmShaders -gt 0) { $mk.ShadersCount = [int]$script:warmShaders }
+            if ([bool]$outcome.Complete) { $mk.ShadersComplete = $true }
+        }
+        Save-WarmMarker $cacheDir $mk
+        # 旧版 builds-meta.json 一并写（老版本启动器/脚本读它）
+        try {
+            $mm = Get-Meta
+            $p = $script:warmProj
+            $mm[(Get-NormPath $p)] = [pscustomobject]@{
+                project = $p; exe = $script:warmExe; cache = $cacheDir
+                commit = $mk.Commit; branch = $(if ($script:projInfo) { [string]$script:projInfo.Branch } else { '' })
+                translator = $script:warmTrId; driver = $script:warmDriver
+                exeTime = $(if ($script:warmBuildTime) { $script:warmBuildTime.ToString('o') } else { '' })
+                prewarmTime = $now
+                shadersDone = $mk.ShadersDone; pipesDone = $mk.PipesDone
+                shadersComplete = $mk.ShadersComplete; pipesComplete = $mk.PipesComplete
+                pipesFingerprint = $mk.PipesFingerprint; pipesLines = $mk.PipesLines; shadersCount = $mk.ShadersCount
+            }
+            Save-Meta $mm
+        } catch { }
+        Add-Log ("已写预热记录: {0}" -f (Join-Path $cacheDir $script:markerName))
+        if ($Quiet) { return $null }
+        $r = Update-CacheStateLabel
+        if ($r) {
+            $lblStatus.Text = '预热完成 · ' + $r.State.Text
+            Add-Log ("预热后缓存状态: {0} | {1}" -f $r.State.State, $r.State.Text)
+            foreach ($d in $r.State.Details) { Add-Log ("  " + $d) }
+        }
+        return $r
+    } catch {
+        Add-Log ("写预热记录失败: " + $_.Exception.Message)
+        return $null
+    }
+}
+
 function Update-Warm {
     if (-not $script:proc) { return }
     $lines = @()
@@ -747,9 +1515,7 @@ function Update-Warm {
     $lines += Read-Log $script:errLog ([ref]$script:posErr)
     foreach ($line in $lines) {
         Add-Log $line
-        if ($line -match '(\d+)\s+of\s+(\d+),\s+(\d+)\s*s') { $script:warmDone = [int]$matches[1]; $script:warmTotal = [int]$matches[2] }
-        elseif ($line -match '(\d+)\s+shaders in the cache') { $script:warmDone = [int]$matches[1]; if ($script:warmTotal -lt $script:warmDone) { $script:warmTotal = $script:warmDone } }
-        if ($line -match 'shaders in the cache|file scan complete|made in \d+') { $script:warmSawDone = $true }
+        Read-WarmLine $line
     }
     if ($script:warmTotal -gt 0) {
         $v = [int](100 * $script:warmDone / $script:warmTotal); if ($v -gt 100) { $v = 100 }
@@ -762,42 +1528,84 @@ function Update-Warm {
             $tail = @()
             $tail += Read-Log $script:outLog ([ref]$script:posOut)
             $tail += Read-Log $script:errLog ([ref]$script:posErr)
-            foreach ($l in $tail) { Add-Log $l; if ($l -match 'shaders in the cache|file scan complete|made in \d+') { $script:warmSawDone = $true } }
+            foreach ($l in $tail) { Add-Log $l; Read-WarmLine $l }
         } catch { }
-        $ok = ($null -eq $code) -or ("$code" -eq '') -or ($code -eq 0) -or $script:warmSawDone -or ($script:warmDone -gt 0)
-        Add-Log ("预热结束（退出码 {0}）" -f $(if ("$code" -eq '') { '未知' } else { $code }))
-        if ($script:warmKind -eq 'all' -and $ok -and $script:autoStage -eq 0) {
+        $kind = $script:warmKind
+        Add-Log ("预热结束[{0}]（退出码 {1}）" -f $kind, $(if ("$code" -eq '') { '未知' } else { $code }))
+        $post = Get-WarmArtifacts $script:warmCacheDir $script:warmFp
+        $pre = $script:warmPre
+        if (-not $pre) { $pre = [pscustomobject]@{ PipesLines = 0; ShaderFiles = 0 } }
+        $outcome = Get-WarmOutcome $kind $code $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne ''))
+        Add-Log ("  判定: done={0} complete={1} — {2}" -f $outcome.Done, $outcome.Complete, $outcome.Note)
+        if ($outcome.Done) { [void](Save-WarmRecord $kind $outcome) }
+        $script:autoStage = if ($kind -eq 'all') { [int]$script:autoStage } else { 0 }
+        if ($kind -eq 'all' -and $script:autoStage -eq 0) {
+            # 着色器阶段记录完再继续管线（即使管线阶段失败/被停止，着色器记录也不会丢）
             $script:autoStage = 1
+            $progress.Value = 0
             Start-Warm 'pipelines'
             return
         }
         $script:autoStage = 0
-        $progress.Value = 100
+        if ($outcome.Complete) { $progress.Value = 100 }
         $btnWarmAll.Enabled = $true; $btnWarmShaders.Enabled = $true; $btnWarmPipes.Enabled = $true
         $btnStop.Enabled = $false; $btnLaunch.Enabled = $true
-        $lblStatus.Text = '预热完成'
-        try {
-            if ($script:builds -and $lstBuilds.SelectedIndex -ge 0) {
-                $bb = $script:builds[$lstBuilds.SelectedIndex]
-                $mm = Get-Meta
-                $mm[$bb.Project] = [pscustomobject]@{
-                    commit = $script:projInfo.Commit; branch = $script:projInfo.Branch
-                    translator = $script:projInfo.Translator
-                    exeTime = $bb.Time.ToString('o'); prewarmTime = (Get-Date).ToString('o')
-                }
-                Save-Meta $mm
-                Add-Log '已记录预热时间戳'
-            }
-        } catch { }
+        if (-not $outcome.Done) {
+            $lblStatus.Text = '预热没有产出，请查看日志'
+            Add-Log '预热没有产出：缓存文件没有变化（退出码/日志见上）'
+        }
+        if (-not $outcome.Complete -and $outcome.Done) {
+            Add-Log '预热未完成：可以再点一次「全部预热」/「预编译管线」从中断处续传'
+        }
     }
 }
 
 function Stop-Warm {
-    try { if ($script:proc -and -not $script:proc.HasExited) { $script:proc.Kill($true); Add-Log '已停止预热' } } catch { }
+    $kind = $script:warmKind
+    $killed = 0
+    try {
+        if ($script:proc) {
+            $killed = Stop-ProcTree $script:proc
+            Add-Log ("已停止预热（同时结束子进程 {0} 个）" -f $killed)
+        }
+    } catch { }
+    [void](Clear-StaleWarmProcs)
     $script:proc = $null; $script:autoStage = 0
+    # 已经产出的部分也记下来：中断不是“没预热”，下次续传即可
+    try {
+        if ($kind -and $script:warmCacheDir) {
+            $post = Get-WarmArtifacts $script:warmCacheDir $script:warmFp
+            $pre = $script:warmPre
+            if (-not $pre) { $pre = [pscustomobject]@{ PipesLines = 0; ShaderFiles = 0 } }
+            $outcome = Get-WarmOutcome $kind 1 $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne ''))
+            if ($outcome.Done) {
+                [void](Save-WarmRecord $kind $outcome -Quiet)
+                Add-Log ("已记录中断前的预热结果: {0}" -f $outcome.Note)
+            }
+        }
+    } catch { }
+    $script:autoStage = 0
     $btnWarmAll.Enabled = $true; $btnWarmShaders.Enabled = $true; $btnWarmPipes.Enabled = $true
     $btnStop.Enabled = $false; $btnLaunch.Enabled = $true
     $lblStatus.Text = '已停止'
+    try { [void](Update-CacheStateLabel) } catch { }
+}
+
+# 启动前的缓存闸门：实时重算（此前用的是上次选构建时的旧值，预热完成后仍会误报“没预热”）
+# 返回 $true 表示可以启动。只有“从没预热过/版本对不上”才弹窗，其余只写日志。
+function Test-LaunchCacheGate($cs, [switch]$NoPrompt) {
+    if (-not $cs) { [void](Update-CacheStateLabel); $cs = $script:cacheState }
+    if (-not $cs) { return $true }
+    Add-Log ("缓存状态: {0} | {1}" -f $cs.State, $cs.Text)
+    foreach ($d in $cs.Details) { Add-Log ("  " + $d) }
+    if ($cs.State -eq 'never' -or $cs.State -eq 'stale') {
+        $tip = if ($cs.State -eq 'never') { '点「全部预热」一次，之后就不用再预热了。' } else { '重新「全部预热」即可；旧缓存不会被删。' }
+        if ($NoPrompt) { return $false }
+        $r2 = [System.Windows.Forms.MessageBox]::Show("$($cs.Text)`r`n`r`n$tip`r`n`r`n仍然启动吗？", '缓存可能过期', 'YesNo', 'Warning')
+        return ($r2 -eq 'Yes')
+    }
+    if ($cs.State -eq 'partial') { Add-Log ("提示: " + $cs.Text) }
+    return $true
 }
 
 function Launch-Game {
@@ -807,13 +1615,10 @@ function Launch-Game {
         if ($already.Count -gt 0) {
             $pids = ($already | ForEach-Object { $_.Id }) -join ', '
             Add-Log ("检测到已有 victory 进程（PID: {0}），拒绝重复启动（否则会因文件锁报 0x80070005）" -f $pids)
-            [System.Windows.Forms.MessageBox]::Show(("已经有游戏/预热进程在运行（PID: {0}）。`r`n`r`n请先关闭游戏窗口或结束这些进程，否则会报 0x80070005（拒绝访问）。" -f $pids), '已有实例在运行')
+            [System.Windows.Forms.MessageBox]::Show(("已经有游戏/预热进程在运行（PID: {0}）。`r`n`r`n请先关闭游戏窗口或结束这些进程，否则会报 0x80070005（拒绝访问）。`r`n`r`n（若是上次预热残留，点「停止」或重启启动器会自动清理。）" -f $pids), '已有实例在运行')
             return
         }
-        if ($script:cacheState -and $script:cacheState.State -ne 'ok') {
-            $r = [System.Windows.Forms.MessageBox]::Show("$($script:cacheState.Text)`r`n`r`n仍然启动吗？（建议先「全部预热」）", '缓存可能过期', 'YesNo', 'Warning')
-            if ($r -ne 'Yes') { return }
-        }
+        if (-not (Test-LaunchCacheGate)) { return }
         $envInfo = Build-Env
         $gameExe = Join-Path $tbGame.Text.Trim() 'game_scarlett_master.exe'
         if (-not (Test-Path $gameExe)) { Add-Log "找不到游戏: $gameExe"; return }
@@ -871,7 +1676,7 @@ function Download-FromGitHub([string]$repo, [string]$branch, [string]$destDir, [
             Add-Log ("已解压到: {0}" -f $extract)
         }
         $lblStatus.Text = '下载完成'
-        Scan-Builds
+        Scan-Builds -Async
     } catch {
         Add-Log ("下载失败: " + $_.Exception.Message)
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '下载失败')
@@ -911,8 +1716,8 @@ function Start-CompileAsync([string]$cargoRoot, [string]$labelName) {
 function Stop-Compile {
     try {
         if ($script:compile -and $script:compile.Proc -and -not $script:compile.Proc.HasExited) {
-            $script:compile.Proc.Kill($true)
-            Add-Log '已取消编译'
+            [void](Stop-ProcTree $script:compile.Proc)
+            Add-Log '已取消编译（含 cargo/rustc 子进程）'
         }
         $script:compile = $null
         try { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 } catch { }
@@ -945,8 +1750,13 @@ function Finish-CompileAttempt([bool]$ok) {
                 Add-Log ("已部署: {0}" -f (Join-Path $dst 'victory.exe'))
             } catch { Add-Log ("部署失败: " + $_.Exception.Message) }
             $c.Ok = $true; $c.Done = $true
-            Scan-Builds
+            Scan-Builds -Async
             $lblStatus.Text = ('编译完成: ' + $c.Label)
+            if ($script:updateCompile) {
+                $script:updateCompile = $false
+                $lblVerInfo.Text = '更新+编译完成 → 需要重新「全部预热」'
+                Add-Log '更新完成：请重新执行「全部预热」（新版翻译器会让旧缓存失效）'
+            }
             try { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 } catch { }
             Set-CompileButtons $true
             return
@@ -1004,58 +1814,126 @@ function Compile-Selected {
 }
 
 # ---------------------------------------------------------------- 上游更新
+# 检查更新 / 更新并编译：全部放后台（git fetch/pull 慢的时候界面也不卡，进度实时打进日志）
 function Check-Update {
     try {
         if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        if (Test-BgBusy) { return }
         $b = $script:builds[$lstBuilds.SelectedIndex]
         $info = Get-ProjectInfo $b.Project
         $script:projInfo = $info
         $proxy = $tbProxy.Text.Trim()
+        $script:checkCtx = [pscustomobject]@{ Project = $b.Project; Branch = [string]$info.Branch; Remote = [string]$info.Remote; Repo = $tbRepo.Text.Trim(); RepoBranch = $tbBranch.Text.Trim() }
         if ($info.Git) {
             $gp = if ($proxy) { @('-c', "http.proxy=$proxy", '-c', "https.proxy=$proxy") } else { @() }
             Add-Log ("检查上游: {0} 分支 {1}" -f $info.Remote, $info.Branch)
-            $null = & git -C $b.Project @gp fetch origin 2>&1 | Select-Object -Last 2 | ForEach-Object { if ($_) { Add-Log ("  git: " + $_) } }
-            $behind = & git -C $b.Project rev-list --count "HEAD..origin/$($info.Branch)" 2>$null
-            $head = & git -C $b.Project log -1 --format='%h %s' "origin/$($info.Branch)" 2>$null
-            if ("$behind" -match '^\d+$') {
-                if ([int]$behind -gt 0) {
-                    $lblVerInfo.Text = "落后上游 $behind 个提交 | 上游最新: $head"
-                    Add-Log ("有更新：落后 {0} 个提交，上游最新 {1}" -f $behind, $head)
-                } else {
-                    $lblVerInfo.Text = '已是最新'
-                    Add-Log '已是最新'
-                }
-            } else { Add-Log '无法比较（分支或远端缺失）' }
+            $args = @('-C', $b.Project) + $gp + @('fetch', 'origin')
+            [void](Start-BgProc '检查上游（git fetch）' 'git' $args $b.Project {
+                param($code, $text)
+                try {
+                    $c = $script:checkCtx
+                    if (-not $c) { return }
+                    # 不用退出码（PS5.1 带重定向时拿不到）：直接问 git 落后多少
+                    $behind = & git -C $c.Project rev-list --count "HEAD..origin/$($c.Branch)" 2>$null
+                    $head = & git -C $c.Project log -1 --format='%h %s' "origin/$($c.Branch)" 2>$null
+                    if ("$behind" -match '^\d+$') {
+                        if ([int]$behind -gt 0) {
+                            $lblVerInfo.Text = "落后上游 $behind 个提交 | 上游最新: $head"
+                            Add-Log ("有更新：落后 {0} 个提交，上游最新 {1}" -f $behind, $head)
+                        } else {
+                            $lblVerInfo.Text = '已是最新'
+                            Add-Log '已是最新'
+                        }
+                        if ("$code" -ne '' -and "$code" -ne '0') { Add-Log ("（fetch 退出码 {0}，但比较可用）" -f $code) }
+                    } else {
+                        $lblVerInfo.Text = '检查失败（网络/代理？见日志）'
+                        Add-Log '检查失败：无法比较 HEAD 与远端分支（多半是 fetch 没成功，检查代理）'
+                    }
+                } catch { Add-Log ("检查更新失败: " + $_.Exception.Message) }
+            })
         } else {
-            $repo = $tbRepo.Text.Trim(); $branch = $tbBranch.Text.Trim()
-            $c = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$branch" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
-            $msg = ($c.commit.message -split "`n")[0]
-            $lblVerInfo.Text = ("上游最新: {0} {1}" -f $c.sha.Substring(0, 7), $msg)
-            Add-Log ("上游最新: {0} {1}" -f $c.sha.Substring(0, 7), $msg)
+            # 非 git 构建：用 GitHub API（网络请求放作业里，超时也不卡界面）
+            $repo = $script:checkCtx.Repo
+            $branch = $script:checkCtx.RepoBranch
+            $worker = {
+                param($repo, $branch)
+                try {
+                    $c = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$branch" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+                    [pscustomobject]@{ Ok = $true; Sha = [string]$c.sha; Msg = (($c.commit.message -split "`n")[0]) }
+                } catch {
+                    [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message }
+                }
+            }
+            [void](Start-BgJob '检查上游（GitHub API）' $worker @($repo, $branch) {
+                param($out, $state)
+                $r = @($out) | Select-Object -Last 1
+                if (-not $r) { Add-Log '检查更新没有结果'; return }
+                if ($r.Ok) {
+                    $short = if ($r.Sha.Length -ge 7) { $r.Sha.Substring(0,7) } else { $r.Sha }
+                    $lblVerInfo.Text = ("上游最新: {0} {1}" -f $short, $r.Msg)
+                    Add-Log ("上游最新: {0} {1}" -f $short, $r.Msg)
+                } else {
+                    $lblVerInfo.Text = '检查失败'
+                    Add-Log ("检查更新失败: " + $r.Error)
+                }
+            })
         }
     } catch { Add-Log ("检查更新失败: " + $_.Exception.Message); $lblVerInfo.Text = '检查失败' }
 }
 
 function Update-Build {
+    param([switch]$ForceConfirm)
     try {
         if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        if (Test-BgBusy) { return }
+        if ($script:compile -and $script:compile.Proc -and -not $script:compile.Proc.HasExited) { Add-Log '正在编译，等它结束再更新'; return }
         $b = $script:builds[$lstBuilds.SelectedIndex]
         $info = Get-ProjectInfo $b.Project
         if (-not $info.Git) { Add-Log '该构建不是 git 工程：请用「下载源码 ZIP」重新获取'; return }
-        $r = [System.Windows.Forms.MessageBox]::Show("将更新 $($b.Name) 并重新编译。`r`n更新前会自动备份当前 exe。`r`n`r`n继续吗？", '更新构建', 'YesNo', 'Question')
-        if ($r -ne 'Yes') { return }
-        $bak = "$($b.Exe).bak-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
-        Copy-Item $b.Exe $bak -Force
-        Add-Log ("已备份 exe: {0}" -f (Split-Path $bak -Leaf))
+        if (-not $ForceConfirm) {
+            $r = [System.Windows.Forms.MessageBox]::Show("将更新 $($b.Name) 并重新编译。`r`n更新前会自动备份当前 exe。`r`n`r`n整个过程在后台进行，界面不会卡。`r`n`r`n继续吗？", '更新构建', 'YesNo', 'Question')
+            if ($r -ne 'Yes') { return }
+        }
+        # 备份 exe（约 10MB，几十毫秒；失败不拦更新）
+        try {
+            $bak = "$($b.Exe).bak-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
+            Copy-Item $b.Exe $bak -Force
+            Add-Log ("已备份 exe: {0}" -f (Split-Path $bak -Leaf))
+        } catch { Add-Log ("备份 exe 失败（继续）: " + $_.Exception.Message) }
         $proxy = $tbProxy.Text.Trim()
-        $gp = if ($proxy) { @('-c', "http.proxy=$proxy", '-c', "https.proxy=$proxy") } else { @() }
-        $null = & git -C $b.Project @gp pull --ff-only 2>&1 | Select-Object -Last 3 | ForEach-Object { if ($_) { Add-Log ("  git: " + $_) } }
-        $mm = Get-Meta
-        if ($mm[$b.Project]) { $mm[$b.Project].prewarmTime = ''; Save-Meta $mm }
-        Add-Log '源码已更新，开始编译…'
-        Compile-Selected
-        $lblVerInfo.Text = '更新+编译完成 → 需要重新「全部预热」'
-        Add-Log '更新完成：请重新执行「全部预热」'
+        $gitArgs = @('-C', $b.Project)
+        if ($proxy) { $gitArgs += @('-c', "http.proxy=$proxy", '-c', "https.proxy=$proxy") }
+        $gitArgs += @('pull', '--ff-only')
+        $script:updateCtx = [pscustomobject]@{ Project = $b.Project; Name = $b.Name; Exe = $b.Exe; Branch = [string]$info.Branch; PreHead = [string](& git -C $b.Project rev-parse HEAD 2>$null) }
+        $lblVerInfo.Text = '正在更新源码（后台）…'
+        [void](Start-BgProc '更新源码（git pull）' 'git' $gitArgs $b.Project {
+            param($code, $text)
+            try {
+                $c = $script:updateCtx
+                if (-not $c) { return }
+                $head = [string](& git -C $c.Project rev-parse HEAD 2>$null)
+                $bad = ("$text" -match '(?im)(^|\s)(fatal|error|CONFLICT|rejected)\b')
+                if ($bad -or -not $head) {
+                    $lblVerInfo.Text = '更新失败（见日志）'
+                    Add-Log '更新失败：源码没有变动，仍可编译当前版本'
+                    return
+                }
+                $changed = ($c.PreHead -and $head -and ($c.PreHead -ne $head))
+                if ($changed) { Add-Log ("源码已更新: {0} → {1}" -f $c.PreHead.Substring(0, [math]::Min(7, $c.PreHead.Length)), $head.Substring(0, [math]::Min(7, $head.Length))) }
+                else { Add-Log '源码已是最新（没有新提交），继续编译当前版本' }
+                # 源码变了：清掉旧预热记录（翻译器指纹变了，缓存要重做）
+                try {
+                    $mm = Get-Meta
+                    $me = Find-MetaEntry $mm $c.Project $c.Exe $null
+                    if ($me) { $me.prewarmTime = ''; Save-Meta $mm }
+                } catch { }
+                $lblVerInfo.Text = '源码已就绪，正在后台编译…'
+                Add-Log '开始后台编译…'
+                $script:updateCompile = $true
+                $ok = Start-CompileAsync $c.Project $c.Name
+                if (-not $ok) { $script:updateCompile = $false; Add-Log '编译没能启动（检查 cargo 是否可用）'; $lblVerInfo.Text = '源码已更新，编译未启动' }
+            } catch { Add-Log ("更新后续处理失败: " + $_.Exception.Message) }
+        })
     } catch { Add-Log ("更新失败: " + $_.Exception.Message) }
 }
 
@@ -1068,7 +1946,7 @@ function Rollback-Build {
         Copy-Item $baks[0].FullName $b.Exe -Force
         Add-Log ("已回滚到 {0}（{1:MM-dd HH:mm}）" -f $baks[0].Name, $baks[0].LastWriteTime)
         $lblVerInfo.Text = "已回滚到 $($baks[0].Name)"
-        Scan-Builds
+        Scan-Builds -Async
     } catch { Add-Log ("回滚失败: " + $_.Exception.Message) }
 }
 
@@ -1452,7 +2330,7 @@ function Register-Prebuilt([string]$exePath, [string]$repo) {
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
         Copy-Item $exePath (Join-Path $dst 'victory.exe') -Force
         Add-Log ("已登记预编译 exe: {0}" -f (Join-Path $dst 'victory.exe'))
-        Scan-Builds
+        Scan-Builds -Async
         return $true
     } catch { Add-Log ("登记失败: " + $_.Exception.Message); return $false }
 }
@@ -1500,7 +2378,7 @@ function Build-And-Deploy([string]$cargo) {
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
         Copy-Item $exe.FullName (Join-Path $dst 'victory.exe') -Force
         Add-Log ("已部署: {0}" -f (Join-Path $dst 'victory.exe'))
-        Scan-Builds
+        Scan-Builds -Async
         return $true
     } catch { Add-Log ("编译失败: " + $_.Exception.Message); return $false }
 }
@@ -1835,7 +2713,7 @@ foreach ($b in $btnBrowse) {
         if ($dlg.ShowDialog() -eq 'OK') { $tbPath[$i].Text = $dlg.SelectedPath; Save-Cfg }
     })
 }
-$btnScan.Add_Click({ Scan-Builds })
+$btnScan.Add_Click({ Scan-Builds -Async })
 $btnRaceNow.Add_Click({ Update-Race })
 $btnRacePull.Add_Click({
     if ($lstRace.SelectedIndex -ge 0 -and $script:raceList) { Pull-RaceBuild $script:raceList[$lstRace.SelectedIndex] }
@@ -1877,6 +2755,7 @@ $btnWarmShaders.Add_Click({ Start-Warm 'shaders' })
 $btnWarmPipes.Add_Click({ Start-Warm 'pipelines' })
 $btnWarmAll.Add_Click({ Start-Warm 'all' })
 $btnStop.Add_Click({ Stop-Warm })
+$btnCheckCache.Add_Click({ Test-CacheStateNow })
 $btnLaunch.Add_Click({ Launch-Game })
 $btnOpenLogs.Add_Click({
     try {
@@ -1888,6 +2767,8 @@ $btnOpenLogs.Add_Click({
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 250
 $timer.Add_Tick({
+    try { Update-BgProc } catch { Add-Log ("后台任务更新出错: " + $_.Exception.Message) }
+    try { Update-BgJob } catch { }
     try { Update-Warm } catch { Add-Log ("更新出错: " + $_.Exception.Message) }
     try { Update-Compile } catch { }
     try {
@@ -1926,12 +2807,25 @@ $timer.Start()
 
 $form.Add_FormClosing({
     try { Save-Cfg } catch { }
-    try { if ($script:proc -and -not $script:proc.HasExited) { $script:proc.Kill($true) } } catch { }
-    try { if ($chkOpenDir.Checked -and $script:game -and -not $script:game.HasExited) { $script:game.Kill($true) } } catch { }
+    # 关窗口时若正在预热，先把已经产出的结果记下来（否则下次启动会误报“从未预热”）
+    try {
+        if ($script:proc -and -not $script:proc.HasExited -and $script:warmKind -and $script:warmCacheDir) {
+            $post = Get-WarmArtifacts $script:warmCacheDir $script:warmFp
+            $pre = $script:warmPre
+            if (-not $pre) { $pre = [pscustomobject]@{ PipesLines = 0; ShaderFiles = 0 } }
+            $outcome = Get-WarmOutcome $script:warmKind 1 $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne ''))
+            if ($outcome.Done) { [void](Save-WarmRecord $script:warmKind $outcome -Quiet) }
+        }
+    } catch { }
+    try { if ($script:proc) { [void](Stop-ProcTree $script:proc) } } catch { }
+    try { [void](Clear-StaleWarmProcs) } catch { }
+    try { if ($chkOpenDir.Checked -and $script:game -and -not $script:game.HasExited) { [void](Stop-ProcTree $script:game) } } catch { }
     try { if ('KeyMap' -as [type]) { [KeyMap]::Uninstall() } } catch { }
 })
 $form.Add_Shown({
     Refresh-Hw
+    # 上次异常退出可能留下 warm 子进程（占 CPU、锁缓存），启动时先清掉
+    try { [void](Clear-StaleWarmProcs) } catch { }
     Scan-Builds
     try {
         New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
@@ -2157,6 +3051,343 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
         $form.Close()
     }
     if ($env:GTA6_LAUNCHER_SHOWTAB) { try { $tabs.SelectedIndex = [int]$env:GTA6_LAUNCHER_SHOWTAB } catch { } }
+    if ($env:GTA6_LAUNCHER_FREETEST) {
+        # 界面是否被阻塞：后台任务跑的时候，UI 定时器应该照常走动（阻塞时几乎不动）
+        $script:freeOut = @()
+        $script:freeTicks = 0
+        $script:freePhase = 0
+        $freeTimer = New-Object System.Windows.Forms.Timer
+        $freeTimer.Interval = 100
+        $freeTimer.Add_Tick({ $script:freeTicks++ })
+        $freeTimer.Start()
+        $script:freeOut += ("start=" + (Get-Date).ToString('HH:mm:ss'))
+        # 阶段1：外部进程（模拟 git pull 这类会卡住的操作，3 秒）
+        $okStart = Start-BgProc '阻塞测试进程' 'powershell' @('-NoProfile', '-Command', 'Start-Sleep -Seconds 3; Write-Output "bg-proc-done"') $env:TEMP {
+            param($code)
+            try {
+                $script:freeOut += ("phase1_exit=" + $code)
+                $script:freeOut += ("phase1_uiTicks=" + $script:freeTicks)
+                # 阶段2：PowerShell 作业（模拟网络请求 / 目录扫描，2 秒）
+                $script:freeTicks = 0
+                $w = { Start-Sleep -Seconds 2; [pscustomobject]@{ Ok = $true; Value = 'bg-job-done' } }
+                [void](Start-BgJob '阻塞测试作业' $w @() {
+                    param($out, $state)
+                    try {
+                        $r = @($out) | Select-Object -Last 1
+                        $script:freeOut += ("phase2_state=" + $state)
+                        $script:freeOut += ("phase2_value=" + $(if ($r) { $r.Value } else { '' }))
+                        $script:freeOut += ("phase2_uiTicks=" + $script:freeTicks)
+                        $script:freeOut += ("bgIdle=" + ((-not $script:bgProc) -and (-not $script:bgJob)))
+                    } catch { $script:freeOut += ("phase2 ERR " + $_.Exception.Message) }
+                    # 阶段3：后台扫描构建（真实目录扫描，最容易卡界面的那个）
+                    $script:freeTicks = 0
+                    $script:freePhase = 3
+                    try {
+                        Scan-Builds -Async
+                        $script:freeOut += ("phase3_scanStarted=True")
+                    } catch { $script:freeOut += ("phase3 ERR " + $_.Exception.Message) }
+                    $watch = New-Object System.Windows.Forms.Timer
+                    $watch.Interval = 250
+                    $watch.Add_Tick({
+                        if ($script:bgJob -or $script:bgProc) { return }
+                        $this.Stop()
+                        try {
+                            $script:freeOut += ("phase3_uiTicks=" + $script:freeTicks)
+                            $script:freeOut += ("phase3_builds=" + @($script:builds).Count)
+                            $script:freeOut += ("phase3_listItems=" + $lstBuilds.Items.Count)
+                            $script:freeOut += ("phase3_bgIdle=" + ((-not $script:bgProc) -and (-not $script:bgJob)))
+                        } catch { $script:freeOut += ("phase3 ERR " + $_.Exception.Message) }
+                        Set-Content -Path $env:GTA6_LAUNCHER_FREETEST -Value ($script:freeOut -join "`r`n") -Encoding UTF8
+                        try { Set-Content -Path ($env:GTA6_LAUNCHER_FREETEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+                        try { $freeTimer.Stop() } catch { }
+                        try { $watch.Stop() } catch { }
+                        try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+                    })
+                    $watch.Start()
+                })
+            } catch { }
+        }
+        $script:freeOut += ("bgProcStarted=" + $okStart)
+        # 看门狗：无论哪一步卡住，180 秒后也把结果写出来并关窗（避免测试把进程挂住）
+        $deadline = New-Object System.Windows.Forms.Timer
+        $deadline.Interval = 180000
+        $deadline.Add_Tick({
+            $this.Stop()
+            try { $script:freeOut += 'TIMEOUT' } catch { }
+            try { Set-Content -Path $env:GTA6_LAUNCHER_FREETEST -Value ($script:freeOut -join "`r`n") -Encoding UTF8 } catch { }
+            try { Set-Content -Path ($env:GTA6_LAUNCHER_FREETEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+            try { if ($script:bgJob) { Stop-Job $script:bgJob.Job -EA SilentlyContinue } } catch { }
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+        })
+        $deadline.Start()
+    }
+    if ($env:GTA6_LAUNCHER_UPDATETEST) {
+        # 验证「检查上游更新」的异步路径：等后台任务自然结束再记录（不再卡界面/不再立即关窗）
+        try { Check-Update } catch { Add-Log ("Check-Update ERR " + $_.Exception.Message) }
+        $ut = New-Object System.Windows.Forms.Timer
+        $ut.Interval = 500
+        $ut.Add_Tick({
+            if ($script:bgProc -or $script:bgJob) { return }
+            $this.Stop()
+            $lines = @()
+            $lines += ("verInfo=" + $lblVerInfo.Text)
+            $lines += ("status=" + $lblStatus.Text)
+            $lines += ("bgIdle=" + ((-not $script:bgProc) -and (-not $script:bgJob)))
+            Set-Content -Path $env:GTA6_LAUNCHER_UPDATETEST -Value ($lines -join "`r`n") -Encoding UTF8
+            try { Set-Content -Path ($env:GTA6_LAUNCHER_UPDATETEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+        })
+        $ut.Start()
+        $ud = New-Object System.Windows.Forms.Timer
+        $ud.Interval = 150000
+        $ud.Add_Tick({
+            $this.Stop()
+            try { Set-Content -Path $env:GTA6_LAUNCHER_UPDATETEST -Value ("TIMEOUT`r`nverInfo=" + $lblVerInfo.Text) -Encoding UTF8 } catch { }
+            try { Set-Content -Path ($env:GTA6_LAUNCHER_UPDATETEST + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+        })
+        $ud.Start()
+    }
+    if ($env:GTA6_LAUNCHER_PULLTEST_ASYNC) {
+        # 「更新并编译」异步流程测试：本地临时 git 仓库（绝不碰真实构建）
+        $script:pullOut = @()
+        $script:pullTicks = 0
+        $tmp = Join-Path $env:TEMP ('gta6-pulltest-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        try {
+            New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+            $origin = Join-Path $tmp 'origin.git'
+            $work = Join-Path $tmp 'work'
+            & git init --bare $origin 2>&1 | Out-Null
+            & git clone $origin $work 2>&1 | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $work 'target\diag') | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $work 'crates\victory-shader\src') | Out-Null
+            Set-Content -Path (Join-Path $work 'Cargo.toml') -Value "[workspace]`nmembers = []" -Encoding ASCII
+            Set-Content -Path (Join-Path $work 'crates\victory-shader\src\lib.rs') -Value 'pub fn x() {}' -Encoding ASCII
+            [System.IO.File]::WriteAllBytes((Join-Path $work 'target\diag\victory.exe'), (New-Object byte[] 4096))
+            & git -C $work -c user.email=t@t -c user.name=t add -A 2>&1 | Out-Null
+            & git -C $work -c user.email=t@t -c user.name=t commit -m 'c1' 2>&1 | Out-Null
+            & git -C $work push origin HEAD 2>&1 | Out-Null
+            # 上游再提交一次，然后把工作副本退回上一版 → 现在落后 1 个提交
+            Set-Content -Path (Join-Path $work 'upstream.txt') -Value 'v2' -Encoding ASCII
+            & git -C $work -c user.email=t@t -c user.name=t add -A 2>&1 | Out-Null
+            & git -C $work -c user.email=t@t -c user.name=t commit -m 'c2-upstream' 2>&1 | Out-Null
+            & git -C $work push origin HEAD 2>&1 | Out-Null
+            & git -C $work reset --hard HEAD~1 2>&1 | Out-Null
+            $before = [string](& git -C $work rev-parse HEAD)
+            $script:pullBefore = $before
+            $script:pullWork = $work
+            # 让启动器扫到这个假构建
+            $tbProxy.Text = ''
+            $tbBuildRoot.Text = $tmp
+            Scan-Builds
+            $idx = -1
+            for ($i = 0; $i -lt @($script:builds).Count; $i++) {
+                if ((Get-NormPath $script:builds[$i].Project) -eq (Get-NormPath $work)) { $idx = $i; break }
+            }
+            $script:pullOut += ("buildIndex=" + $idx + " builds=" + @($script:builds).Count)
+            if ($idx -ge 0) { $lstBuilds.SelectedIndex = $idx }
+            # 界面响应计时器：后台跑 git pull 时它应该照常走动
+            $pt = New-Object System.Windows.Forms.Timer
+            $pt.Interval = 100
+            $pt.Add_Tick({ $script:pullTicks++ })
+            $pt.Start()
+            if ($idx -ge 0) { Update-Build -ForceConfirm } else { $script:pullOut += 'noBuildSelected' }
+            # 等 pull 结束（编译产物会失败，只关心 pull 与交接）
+            $pw = New-Object System.Windows.Forms.Timer
+            $pw.Interval = 500
+            $pw.Add_Tick({
+                if ($script:compile -and -not $script:compile.Done -and $script:compile.Proc -and -not $script:compile.Proc.HasExited) { return }
+                if (-not $script:compile -and ($script:bgProc -or $script:bgJob)) { return }
+                if ($script:bgProc -or $script:bgJob) { return }
+                $this.Stop()
+                try {
+                    $after = [string](& git -C $script:pullWork rev-parse HEAD 2>$null)
+                    $script:pullOut += ("after=" + $(if ($after.Length -ge 7) { $after.Substring(0,7) } else { $after }))
+                    $script:pullOut += ("pulled=" + ($after -ne $script:pullBefore -and $after.Length -gt 0))
+                    $script:pullOut += ("verInfo=" + $lblVerInfo.Text)
+                    $script:pullOut += ("uiTicksDuringPull=" + $script:pullTicks)
+                    $script:pullOut += ("compileStarted=" + ($null -ne $script:compile))
+                    $script:pullOut += ("compileOk=" + $(if ($script:compile) { $script:compile.Ok } else { 'n/a' }))
+                } catch { $script:pullOut += ("ERR " + $_.Exception.Message) }
+                Set-Content -Path $env:GTA6_LAUNCHER_PULLTEST_ASYNC -Value ($script:pullOut -join "`r`n") -Encoding UTF8
+                try { Set-Content -Path ($env:GTA6_LAUNCHER_PULLTEST_ASYNC + '.log') -Value $logBox.Text -Encoding UTF8 } catch { }
+                try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+            })
+            $pw.Start()
+        } catch {
+            $script:pullOut += ("EXCEPTION " + $_.Exception.Message)
+            Set-Content -Path $env:GTA6_LAUNCHER_PULLTEST_ASYNC -Value ($script:pullOut -join "`r`n") -Encoding UTF8
+            try { $form.BeginInvoke([System.Action]{ $form.Close() }) | Out-Null } catch { }
+        }
+    }
+    if ($env:GTA6_LAUNCHER_CACHETEST) {
+        # v1.9.1 回归测试：缓存状态判定（不需要真的跑几个小时预热）
+        $lines = @()
+        $pass = 0; $fail = 0
+        $tmp = ''
+        try {
+            $tmp = Join-Path $env:TEMP ('gta6-cachetest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $oldMeta = $script:metaPath
+            $script:metaPath = Join-Path $tmp 'builds-meta.json'
+            $proj = Join-Path $tmp 'proj\vf-cachetest'
+            $srcDir = Join-Path $proj 'crates\victory-shader\src'
+            New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $proj 'crates\victory-gpu\src') | Out-Null
+            Set-Content -Path (Join-Path $srcDir 'lib.rs') -Value 'pub fn a() {}' -Encoding ASCII
+            Set-Content -Path (Join-Path $proj 'Cargo.lock') -Value '# lock' -Encoding ASCII
+            $exe = Join-Path $proj 'target\diag\victory.exe'
+            New-Item -ItemType Directory -Force -Path (Split-Path $exe) | Out-Null
+            [System.IO.File]::WriteAllBytes($exe, [byte[]](1..255))
+            $exeTime = (Get-Date '2026-11-20 10:00:00')
+            [System.IO.File]::SetLastWriteTime($exe, $exeTime)
+            $trId = Get-TranslatorId $proj $exe
+            $lines += "setup: tmp=$tmp tr=$trId"
+
+            # --- 空缓存目录 → never
+            $empty = Join-Path $tmp 'cache-empty'
+            New-Item -ItemType Directory -Force -Path $empty | Out-Null
+            $s1 = Get-CacheState $proj $exeTime $trId $empty 'commitA' $exe '566.03'
+            $ok1 = ($s1.State -eq 'never')
+            if ($ok1) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] empty-cache -> {1} | {2}" -f $(if ($ok1) { 'PASS' } else { 'FAIL' }), $s1.State, $s1.Text)
+
+            # --- 旧版缓存（只有文件、没有记录）+ exe 比缓存老 → ok
+            $c2 = Join-Path $tmp 'cache-artifacts'
+            New-Item -ItemType Directory -Force -Path (Join-Path $c2 'pipelines') | Out-Null
+            Set-Content -Path (Join-Path $c2 'pipelines\warm-done.txt') -Value ("aaaa000000000000 k1`r`naaaa000000000000 k2`r`naaaa000000000000 k3") -Encoding ASCII
+            Set-Content -Path (Join-Path $c2 'pipelines\early-pipelines.txt') -Value ("k1`r`nk2`r`nk3") -Encoding ASCII
+            foreach ($i in 0..39) { $d = Join-Path $c2 ("shaders\{0:x2}" -f $i); New-Item -ItemType Directory -Force -Path $d | Out-Null }
+            Set-Content -Path (Join-Path $c2 'shaders\00\x1') -Value 'x' -Encoding ASCII
+            $s2 = Get-CacheState $proj $exeTime $trId $c2 'commitA' $exe '566.03'
+            $ok2 = ($s2.State -eq 'ok')
+            if ($ok2) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] artifacts-no-record -> {1} | {2} | {3}" -f $(if ($ok2) { 'PASS' } else { 'FAIL' }), $s2.State, $s2.Text, ($s2.Details -join '; '))
+
+            # --- 新记录：版本一致 → ok；exe 时间变新也一样 ok（这正是 v1.9.0 的 bug）
+            $mk = New-WarmRecord
+            $mk.Project = $proj; $mk.Exe = $exe; $mk.Commit = 'commitA'; $mk.Translator = $trId; $mk.Driver = '566.03'
+            $mk.BuildTime = $exeTime.ToString('o')
+            $mk.ShadersDone = $true; $mk.ShadersComplete = $true; $mk.ShadersTime = (Get-Date '2026-11-20 12:00:00').ToString('o'); $mk.ShadersCount = 26000
+            $mk.PipesDone = $true; $mk.PipesComplete = $true; $mk.PipesTime = (Get-Date '2026-11-20 13:00:00').ToString('o'); $mk.PipesFingerprint = 'aaaa000000000000'; $mk.PipesLines = 3
+            Save-WarmMarker $c2 $mk
+            $s3 = Get-CacheState $proj $exeTime $trId $c2 'commitA' $exe '566.03'
+            $ok3 = ($s3.State -eq 'ok')
+            if ($ok3) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] record-match -> {1} | {2}" -f $(if ($ok3) { 'PASS' } else { 'FAIL' }), $s3.State, $s3.Text)
+
+            $newerExe = $exeTime.AddHours(5)   # 重新编译：exe 变新，翻译器没变
+            $s4 = Get-CacheState $proj $newerExe $trId $c2 'commitA' $exe '566.03'
+            $ok4 = ($s4.State -eq 'ok')
+            if ($ok4) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] recompiled-same-translator -> {1} | {2}" -f $(if ($ok4) { 'PASS' } else { 'FAIL' }), $s4.State, $s4.Text)
+
+            # --- 构建更新（commit 变了）→ stale
+            $s5 = Get-CacheState $proj $newerExe $trId $c2 'commitB' $exe '566.03'
+            $ok5 = ($s5.State -eq 'stale')
+            if ($ok5) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] commit-changed -> {1} | {2}" -f $(if ($ok5) { 'PASS' } else { 'FAIL' }), $s5.State, $s5.Text)
+
+            # --- 短 sha 对完整 sha：同一个提交，不能误判
+            $mkX = Get-WarmMarker $c2
+            $mkX.Commit = 'abcdef1234567890abcdef1234567890abcdef12'
+            Save-WarmMarker $c2 $mkX
+            $s5b = Get-CacheState $proj $exeTime $trId $c2 'abcdef1' $exe '566.03'
+            $ok5b = ($s5b.State -eq 'ok')
+            if ($ok5b) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] short-vs-full-sha -> {1} | {2}" -f $(if ($ok5b) { 'PASS' } else { 'FAIL' }), $s5b.State, $s5b.Text)
+            $mkX.Commit = 'commitA'
+            Save-WarmMarker $c2 $mkX
+
+            # --- 翻译器变了 → stale
+            Set-Content -Path (Join-Path $srcDir 'lib.rs') -Value 'pub fn a() { /* changed */ }' -Encoding ASCII
+            $trId2 = Get-TranslatorId $proj $exe
+            $s6 = Get-CacheState $proj $newerExe $trId2 $c2 'commitA' $exe '566.03'
+            $ok6 = ($s6.State -eq 'stale')
+            if ($ok6) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] translator-changed ({1} -> {2}) -> {3}" -f $(if ($ok6) { 'PASS' } else { 'FAIL' }), $trId, $trId2, $s6.State)
+
+            # --- 驱动更新 → stale（翻译器用原值，只让驱动不同）
+            $s7 = Get-CacheState $proj $newerExe $trId $c2 'commitA' $exe '600.11'
+            $ok7 = ($s7.State -eq 'stale')
+            if ($ok7) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] driver-changed -> {1} | {2}" -f $(if ($ok7) { 'PASS' } else { 'FAIL' }), $s7.State, $s7.Text)
+
+            # --- 管线未编译完（early 里还有 k4 没进 warm-done）→ partial
+            $ef2 = Join-Path $c2 'pipelines\early-pipelines.txt'
+            Set-Content -Path $ef2 -Value ("k1`r`nk2`r`nk3`r`nk4") -Encoding ASCII
+            $s8 = Get-CacheState $proj $exeTime $trId $c2 'commitA' $exe '566.03'
+            $ok8 = ($s8.State -eq 'partial' -and $s8.MissingEarly -eq 1)
+            if ($ok8) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] pipelines-incomplete -> {1} missingEarly={2} | {3}" -f $(if ($ok8) { 'PASS' } else { 'FAIL' }), $s8.State, $s8.MissingEarly, $s8.Text)
+            Set-Content -Path $ef2 -Value ("k1`r`nk2`r`nk3") -Encoding ASCII
+
+            # --- 上次预热中途被停（complete=false）→ partial（可续传，不拦启动）
+            $mk2 = Get-WarmMarker $c2
+            $mk2.PipesComplete = $false
+            Save-WarmMarker $c2 $mk2
+            $s8b = Get-CacheState $proj $exeTime $trId $c2 'commitA' $exe '566.03'
+            $ok8b = ($s8b.State -eq 'partial')
+            if ($ok8b) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] incomplete-warm -> {1} | {2}" -f $(if ($ok8b) { 'PASS' } else { 'FAIL' }), $s8b.State, $s8b.Text)
+            $mk2.PipesComplete = $true
+            Save-WarmMarker $c2 $mk2
+
+            # --- 只有着色器 → partial
+            $c9 = Join-Path $tmp 'cache-shaders-only'
+            foreach ($i in 0..39) { $d = Join-Path $c9 ("shaders\{0:x2}" -f $i); New-Item -ItemType Directory -Force -Path $d | Out-Null }
+            Set-Content -Path (Join-Path $c9 'shaders\01\x2') -Value 'y' -Encoding ASCII
+            $s9 = Get-CacheState $proj $exeTime $trId $c9 'commitA' $exe '566.03'
+            $ok9 = ($s9.State -eq 'partial')
+            if ($ok9) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] shaders-only -> {1} | {2}" -f $(if ($ok9) { 'PASS' } else { 'FAIL' }), $s9.State, $s9.Text)
+
+            # --- 预热结果判定（纯函数）
+            $o1 = Get-WarmOutcome 'pipelines' 0 0 0 3 3 1 1 $true
+            $o2 = Get-WarmOutcome 'pipelines' 1 500 0 3 10 1 1 $true
+            $o3 = Get-WarmOutcome 'pipelines' 1 500 0 3 3 1 1 $false
+            $o4 = Get-WarmOutcome 'shaders' 0 0 26000 3 3 0 1 $false
+            $o5 = Get-WarmOutcome 'shaders' 1 0 1000 3 3 0 0 $false
+            $o6 = Get-WarmOutcome 'shaders' 0 0 0 3 3 0 0 $false
+            $okW = ($o1.Done -and $o1.Complete) -and ($o2.Done -and -not $o2.Complete) -and (-not $o3.Done) -and ($o4.Done -and $o4.Complete) -and ($o5.Done -and -not $o5.Complete) -and (-not $o6.Done)
+            if ($okW) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] outcome: done0/complete={1} partial={2} {3} shadersOK={4} shadersPartial={5} shadersNone={6}" -f $(if ($okW) { 'PASS' } else { 'FAIL' }), $o1.Complete, $o2.Done, $o3.Done, $o4.Complete, $o5.Done, $o6.Done)
+
+            # --- meta key 兼容：旧写法（未规范化的全路径）也能读到
+            $meta2 = @{}
+            $meta2[$proj.ToUpper() + '\'] = [pscustomobject]@{ project = $proj; exe = $exe; cache = $c2; commit = 'commitA'; translator = $trId; prewarmTime = (Get-Date '2026-11-20 13:00:00').ToString('o') }
+            Save-Meta $meta2
+            $found = Find-MetaEntry (Get-Meta) $proj $exe $c2
+            $okM = ($null -ne $found -and $found.translator -eq $trId)
+            if ($okM) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] meta-key-normalized found={1}" -f $(if ($okM) { 'PASS' } else { 'FAIL' }), ($null -ne $found))
+
+            # --- 启动闸门：never/stale 拦（NoPrompt 下返回 false），ok/partial 放行
+            $gNever = Test-LaunchCacheGate ([pscustomobject]@{ State = 'never'; Text = 't'; Details = @() }) -NoPrompt
+            $gStale = Test-LaunchCacheGate ([pscustomobject]@{ State = 'stale'; Text = 't'; Details = @() }) -NoPrompt
+            $gOk = Test-LaunchCacheGate ([pscustomobject]@{ State = 'ok'; Text = 't'; Details = @() }) -NoPrompt
+            $gPart = Test-LaunchCacheGate ([pscustomobject]@{ State = 'partial'; Text = 't'; Details = @() }) -NoPrompt
+            $okG = (-not $gNever) -and (-not $gStale) -and $gOk -and $gPart
+            if ($okG) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] launch-gate never={1} stale={2} ok={3} partial={4}" -f $(if ($okG) { 'PASS' } else { 'FAIL' }), $gNever, $gStale, $gOk, $gPart)
+
+            # --- 进程树结束（不含真实进程：只验证空输入不报错、返回 0）
+            $okStop = ((Stop-ProcTree $null) -eq 0)
+            if ($okStop) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] stop-proctree-null -> 0" -f $(if ($okStop) { 'PASS' } else { 'FAIL' }))
+
+            $script:metaPath = $oldMeta
+        } catch {
+            $fail++
+            $lines += ("EXCEPTION: " + $_.Exception.Message)
+            $lines += ($_.ScriptStackTrace -split "`n" | Select-Object -First 3)
+        } finally {
+            try { if ($tmp -and (Test-Path $tmp)) { Remove-Item $tmp -Recurse -Force -EA SilentlyContinue } } catch { }
+            try { if ($script:metaPath -ne (Join-Path $Root 'builds-meta.json')) { $script:metaPath = Join-Path $Root 'builds-meta.json' } } catch { }
+        }
+        $lines += ("RESULT: pass={0} fail={1}" -f $pass, $fail)
+        Set-Content -Path $env:GTA6_LAUNCHER_CACHETEST -Value ($lines -join "`r`n") -Encoding UTF8
+        $form.Close()
+    }
     if ($env:GTA6_LAUNCHER_SELFTEST) {
         try {
             $lines = @()
@@ -2169,9 +3400,13 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             $info = Get-ProjectInfo $script:builds[$lstBuilds.SelectedIndex].Project
             $lines += "git=$($info.Git) branch=$($info.Branch) commit=$($info.Commit) remote=$($info.Remote)"
             $lines += "translator=$($info.Translator)"
+            $lines += "translatorId=$(Get-TranslatorId $script:builds[$lstBuilds.SelectedIndex].Project $script:builds[$lstBuilds.SelectedIndex].Exe)"
+            $lines += "driver=$($script:driverVer)"
             $lines += "cacheState=$(($script:cacheState).State) | $(($script:cacheState).Text)"
+            foreach ($d in @(($script:cacheState).Details)) { $lines += "  cache: $d" }
             $lines += "cacheDir=$($script:cacheDir)"
             $lines += "dataDir=$($script:dataDir)"
+            $lines += "marker=$(Test-Path (Join-Path $script:cacheDir $script:markerName))"
             Set-Content -Path $env:GTA6_LAUNCHER_SELFTEST -Value ($lines -join "`r`n") -Encoding UTF8
         } catch { Set-Content -Path $env:GTA6_LAUNCHER_SELFTEST -Value ("ERR " + $_.Exception.Message) }
         $form.Close()
@@ -2180,5 +3415,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.0 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.1 by DKTTT'
 [void]$form.ShowDialog()

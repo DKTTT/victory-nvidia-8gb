@@ -8,6 +8,49 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## [v1.9.1] - 2026-11-26
+
+### 修复（预热完仍提示「没预热」）
+
+用户实测：预热很久，启动还是弹「从未预热」；重新编译一次又永远判「缓存过期」。
+
+| 旧行为 | 根因 | v1.9.1 |
+|---|---|---|
+| 启动前弹「没预热」 | 弹窗用 `$script:cacheState`（**选构建时**算的旧结果），预热完成后从未更新 | 启动前 `Test-LaunchCacheGate` **实时重算** |
+| 记录读不到 | `builds-meta.json` 用**工程路径字符串**当 key，重扫/移动/大小写不一致就查不到 | 记录写进缓存目录 `launcher-warm.json`；旧 meta 仍兼容（工程路径 → exe 路径 → 缓存目录三级查找，key 规范化） |
+| 编译后永远过期 | 用 exe 修改时间和预热时间比较，重新编译必然「更新」 | 改比**版本指纹**：翻译器源码指纹（仿 `victory-gpu/build.rs` 的输入）+ commit（短 sha / 全长 sha 前缀兼容）+ 显卡驱动版本 |
+| 停止/关窗口 = 白做 | 只有完整跑完才写时间戳；`all` 链式预热时着色器阶段不落盘 | 每个阶段完成或中断都记录（`shadersDone/shadersComplete/pipesDone/pipesComplete`），可续传 |
+| 判定依赖日志关键字 | 引擎输出一改就失效 | 以**缓存文件**为准：`shaders` 文件数、`warm-done.txt` 当前指纹行数、`early-pipelines.txt` 差集；日志关键字只作补充 |
+| 弹窗时机不对 | 部分预热/只有着色器也拦 | 只有 `never`/`stale` 弹窗，`partial` 只写日志 |
+
+新增「检查预热状态」按钮：不开游戏即可看到 缓存就绪 / 还差 N 条管线 / 版本变了要重做，日志里带 `build / warmShaders / warmPipes / translator / commit / driver / pipesFingerprint / fpLines / missingEarly` 全量诊断。
+
+### 修复（`停止` 按钮无效 + 残留进程）
+
+- **根因**：`Process.Kill($true)` 是 .NET Core 3.0+ 的重载，PowerShell 5.1（.NET Framework）上直接抛异常被 `catch{}` 吞掉 → 停止按钮和关窗口**从未真正杀掉**预热进程。
+- 实测残留：1 个 `victory warm --used` + 6 个 `victory warm --these` 子进程继续占 CPU、锁缓存文件（启动报 `0x80070005` 的元凶之一）。
+- 修复：`Stop-ProcTree` 按 `Win32_Process` 父子关系结束整棵树（预热 / 编译 cargo+rustc / 游戏通用）；`Clear-StaleWarmProcs` 在启动器启动和开始预热前清理上次残留。
+
+### 新增/修改（更新不再卡界面）
+
+| 操作 | 旧 | v1.9.1 |
+|---|---|---|
+| 检查上游更新（`git fetch`）| 同步阻塞，代理慢时界面假死 | 后台进程 + 实时日志 + 耗时显示 |
+| 更新并编译（`git pull`）| 同步阻塞，之后才启动（本来异步的）编译 | 备份 exe → **后台** pull → 自动接续后台编译；成功/已是最新/失败按 HEAD 变化与输出判断 |
+| 检查上游更新（非 git 构建，GitHub API）| `Invoke-RestMethod` 同步，最长 20s 假死 | 后台作业 |
+| 编译结束 / 下载完成 / 回滚后重新扫描构建 | 同步递归扫描 10~35s（编译完那一刻卡死）| 后台作业扫描，回来只填列表 |
+| 「重新扫描本地构建」按钮 | 同步 | 后台 |
+| 启动时扫描 | 仍同步（窗口刚出现，等 10s）| 不变 |
+
+> 说明：PS 5.1 里带 `-RedirectStandard*` 的 `Start-Process` 拿不到 `ExitCode`（实测恒为空），所以后台进程的成败改为看**输出文本 + 命令自身的副作用**（如 pull 后 HEAD 是否变化、fetch 后能否 `rev-list`）。
+
+### 其它
+
+- `launcher-config.json` 不再把键位页的示例注释当成用户配置写入。
+- 版本号：脚本头部与启动日志 → v1.9.1。
+
+---
+
 ## [v1.8.0] - 2026-11-26
 
 ### 修改（推荐算法 v2）
