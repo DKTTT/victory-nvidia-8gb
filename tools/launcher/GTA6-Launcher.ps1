@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.1
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.2
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -232,6 +232,7 @@ function New-WarmRecord {
     return [pscustomobject]@{
         Project = ''; Exe = ''; Commit = ''; Translator = ''; Driver = ''; BuildTime = ''
         ShadersDone = $false; ShadersComplete = $false; ShadersTime = ''; ShadersCount = 0
+        ShadersUnsupported = $false; PipesUnsupported = $false;
         PipesDone = $false; PipesComplete = $false; PipesTime = ''; PipesFingerprint = ''; PipesLines = 0
     }
 }
@@ -251,6 +252,8 @@ function Get-WarmMarker([string]$cacheDir) {
         $o.ShadersCount = [int]$raw.shadersCount
         $o.PipesDone = [bool]$raw.pipesDone; $o.PipesTime = [string]$raw.pipesTime
         $o.PipesComplete = [bool]$raw.pipesComplete
+        $o.ShadersUnsupported = [bool]$raw.shadersUnsupported
+        $o.PipesUnsupported = [bool]$raw.pipesUnsupported
         $o.PipesFingerprint = [string]$raw.pipesFingerprint; $o.PipesLines = [int]$raw.pipesLines
         return $o
     } catch { return $null }
@@ -272,6 +275,8 @@ function Save-WarmMarker([string]$cacheDir, $o) {
             shadersComplete = [bool]$o.ShadersComplete
             shadersTime    = $o.ShadersTime
             shadersCount   = [int]$o.ShadersCount
+            shadersUnsupported = [bool]$o.ShadersUnsupported
+            pipesUnsupported   = [bool]$o.PipesUnsupported
             pipesDone      = [bool]$o.PipesDone
             pipesComplete  = [bool]$o.PipesComplete
             pipesTime      = $o.PipesTime
@@ -412,6 +417,13 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
     if ($why.Count -gt 0) {
         return [pscustomobject]@{ State = 'stale'; Text = ("⚠ {0}，缓存已失效：请重新「全部预热」" -f $reasonTxt); Details = $details; Reasons = $why; WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
     }
+    # 旧版 victory.exe 没有 warm / shaders 子命令：不是"没预热"，是这套构建做不了
+    if ($mk -and ($mk.PipesUnsupported -or $mk.ShadersUnsupported)) {
+        $what = @()
+        if ($mk.ShadersUnsupported) { $what += '着色器翻译' }
+        if ($mk.PipesUnsupported) { $what += '管线预编译' }
+        return [pscustomobject]@{ State = 'partial'; Text = ("这个构建不支持{0}（victory.exe 没有对应子命令，属于旧版构建）：换 20261126a/b 包或新编译的构建" -f ($what -join '、')); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+    }
     if (-not ($recTr -or $recCommit -or $recDriver)) {
         # 旧缓存：没有版本记录，只能按文件时间判断（给 2 分钟容差）
         $newest = $null
@@ -431,13 +443,20 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
         }
         $cnt = if ($shCount -gt 0) { "着色器 {0} 个 · " -f $shCount } elseif (([int]$art.ShaderFiles) -gt 0) { "着色器 {0} 个 · " -f $art.ShaderFiles } else { '着色器已就绪 · ' }
         if (-not ($shComplete -and $pipesComplete)) {
+            # 只报「真的没跑完」的：管线差几条用引擎的差集算，跑完过就不算
+            if (-not $pipesComplete -and ([int]$art.MissingEarly) -gt 0) {
+                return [pscustomobject]@{ State = 'partial'; Text = ("管线预热未完成：还差 {0} 条（可点「预编译管线」续传）· 着色器已就绪" -f $art.MissingEarly); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+            }
             $what = @()
             if (-not $shComplete) { $what += '着色器' }
             if (-not $pipesComplete) { $what += '管线' }
             $txt = ("缓存可用（管线 {0} 条），但{1}上次没跑完：可再点「全部预热」续传" -f $pipeCount, ($what -join '、'))
             return [pscustomobject]@{ State = 'partial'; Text = $txt; Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
         }
-        return [pscustomobject]@{ State = 'ok'; Text = ("缓存就绪（{0}管线 {1} 条 · 预热 {2}）" -f $cnt, $pipeCount, (Format-TimeShort $when)); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
+        # 跑完过：之后游戏又用到新管线只算提示，不再判「没预热」
+        $extra = ''
+        if (([int]$art.MissingEarly) -gt 0) { $extra = ("；之后游戏又用到 {0} 条新管线，想更顺可再点「预编译管线」" -f $art.MissingEarly) }
+        return [pscustomobject]@{ State = 'ok'; Text = ("缓存就绪（{0}管线 {1} 条 · 预热 {2}{3}）" -f $cnt, $pipeCount, (Format-TimeShort $when), $extra); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
     }
     if ($hasPipes) {
         return [pscustomobject]@{ State = 'partial'; Text = ("已预编译管线（{0} 条），着色器未预翻译：首局会编译着色器，卡顿属正常" -f $pipeCount); Details = $details; Reasons = @(); WarmShaders = $shTime; WarmPipes = $pipeTime; HasShaders = $hasShaders; HasPipes = $hasPipes; Fingerprint = $fp; MissingEarly = $art.MissingEarly }
@@ -446,10 +465,18 @@ function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, 
 }
 
 # 预热结果判定（纯函数，便于自测）：不再依赖日志关键字
-function Get-WarmOutcome([string]$kind, $exitCode, [int]$toMake, [int]$shaderCount, [int]$preLines, [int]$postLines, [int]$preShaders, [int]$postShaders, [bool]$sawFingerprint) {
+# $missing：跑完后按「引擎实际用到的管线」重新算的差集（-1 = 不知道）。
+# 判断“跑完没跑完”用它，而不是用“开始时还有几条要做”——后者跑完也永远 >0。
+function Get-WarmOutcome([string]$kind, $exitCode, [int]$toMake, [int]$shaderCount, [int]$preLines, [int]$postLines, [int]$preShaders, [int]$postShaders, [bool]$sawFingerprint, [int]$missing = -1) {
     $codeOk = ($null -eq $exitCode) -or ("$exitCode" -eq '') -or ([string]$exitCode -eq '0')
     $grew = ($postLines -gt $preLines) -or ($postShaders -gt $preShaders)
     if ($kind -eq 'pipelines') {
+        if ($missing -eq 0) { return [pscustomobject]@{ Done = $true; Complete = $true; Note = '用到的管线已全部编译' } }
+        if ($missing -gt 0) {
+            $done = ($grew -or $codeOk -or $sawFingerprint -or ($toMake -eq 0))
+            return [pscustomobject]@{ Done = $done; Complete = $false; Note = ("还差 {0} 条（可续传）" -f $missing) }
+        }
+        # 拿不到差集：退回“开始时还有几条要做”
         if ($toMake -eq 0) { return [pscustomobject]@{ Done = $true; Complete = $true; Note = '全部管线都已编译' } }
         if ($grew) { return [pscustomobject]@{ Done = $true; Complete = $false; Note = '已编译一部分（可续传）' } }
         if ($codeOk -and $sawFingerprint) { return [pscustomobject]@{ Done = $true; Complete = $false; Note = '引擎报告无需再编译' } }
@@ -789,6 +816,7 @@ $script:warmToMake = -1
 $script:warmKnown = 0
 $script:warmMade = 0
 $script:warmShaders = 0
+$script:warmUnsupported = ''
 $script:warmPre = $null
 $script:autoStage = 0
 $script:bgProc = $null
@@ -820,6 +848,48 @@ function Add-Log([string]$s) {
 }
 
 # ---------------------------------------------------------------- 硬件检测
+# WMI 的 AdapterRAM 对 >4GB 的卡会截断/为 0：从显示适配器注册表读 qwMemorySize（字节）
+function Get-VramFromRegistry([string]$gpuName, [int]$fallbackMB) {
+    try {
+        $base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+        if (-not (Test-Path $base)) { return $fallbackMB }
+        $key = $gpuName
+        if ($key -match '^(.*?)\s*\(([^)]+)\)\s*$') { $key = $matches[2] }   # 去掉 "Intel(R) UHD Graphics 630" 这种后缀
+        foreach ($sub in @(Get-ChildItem $base -EA SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' })) {
+            try {
+                $desc = [string](Get-ItemProperty $sub.PSPath -Name 'DriverDesc' -EA SilentlyContinue).DriverDesc
+                if (-not $desc) { continue }
+                $match = ($desc -eq $gpuName) -or ($desc -eq $key) -or ($gpuName -like "*$desc*") -or ($desc -like "*$key*")
+                if (-not $match) { continue }
+                $q = (Get-ItemProperty $sub.PSPath -Name 'HardwareInformation.qwMemorySize' -EA SilentlyContinue).'HardwareInformation.qwMemorySize'
+                if ($null -ne $q) {
+                    $mb = [int]([double]$q / 1MB)
+                    if ($mb -gt 0) { return $mb }
+                }
+            } catch { }
+        }
+    } catch { }
+    return $fallbackMB
+}
+
+# 显卡厂商判定：A 卡（AMD）、N 卡（NVIDIA）、Intel 核显都要认
+function Get-GpuVendor([string]$n) {
+    if (-not $n) { return 'Unknown' }
+    if ($n -match '(?i)NVIDIA|GeForce|Quadro|Tesla|\bRTX\b|\bGTX\b') { return 'NVIDIA' }
+    if ($n -match '(?i)\bAMD\b|Radeon|ATI\b|FirePro|Instinct') { return 'AMD' }
+    if ($n -match '(?i)Intel|\bArc\b|Iris|UHD|HD Graphics') { return 'Intel' }
+    return 'Other'
+}
+
+# 双显卡机器（核显 + 独显）不能按枚举顺序取：优先 A/N 独显，其次显存大的
+function Select-BestGpu($gpus) {
+    $cand = @($gpus | Where-Object { $_ -and $_.Name -and $_.Name -notmatch '(?i)Microsoft Basic|Parsec|Virtual|Remote' })
+    if ($cand.Count -eq 0) { return $null }
+    $discrete = @($cand | Where-Object { (Get-GpuVendor $_.Name) -in @('NVIDIA', 'AMD') })
+    $pick = if ($discrete.Count -gt 0) { $discrete } else { $cand }
+    return ($pick | Sort-Object @{ Expression = { try { [int]$_.AdapterRAM } catch { 0 } } } -Descending | Select-Object -First 1)
+}
+
 function Detect-Hardware {
     $gpus = @()
     try {
@@ -830,7 +900,8 @@ function Detect-Hardware {
     try { $cs = Get-CimInstance Win32_ComputerSystem -EA SilentlyContinue; $ram = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1) } catch { }
     try { $o = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue; $os = "$($o.Caption) build $($o.BuildNumber)" } catch { }
 
-    # NVIDIA 用 nvidia-smi 取准确显存
+    $name = ''; $vendor = ''; $vramMB = 0; $driverVer = ''
+    # N 卡优先用 nvidia-smi 取准确显存/驱动；A 卡没有等价工具，走 WMI + 注册表
     $nv = $null
     if (Get-Command nvidia-smi -EA SilentlyContinue) {
         try {
@@ -838,19 +909,18 @@ function Detect-Hardware {
             if ($q) { $parts = $q -split ','; $nv = @{ Name = $parts[0].Trim(); VramMB = [int]($parts[1] -replace '[^\d]', ''); Driver = $parts[2].Trim() } }
         } catch { }
     }
-    $name = ''; $vendor = ''; $vramMB = 0; $driverVer = ''
     if ($nv) {
         $name = $nv.Name; $vramMB = $nv.VramMB; $driverVer = $nv.Driver
-        if ($name -match 'NVIDIA') { $vendor = 'NVIDIA' }
-    } else {
-        $best = $gpus | Where-Object { $_.Name -notmatch 'Microsoft Basic|Parsec|Virtual' } | Select-Object -First 1
+        $vendor = 'NVIDIA'
+    }
+    if (-not $name) {
+        $best = Select-BestGpu $gpus
         if ($best) {
-            $name = $best.Name
-            if ($best.Name -match 'NVIDIA') { $vendor = 'NVIDIA' }
-            elseif ($best.Name -match 'AMD|Radeon') { $vendor = 'AMD' }
-            elseif ($best.Name -match 'Intel') { $vendor = 'Intel' }
-            else { $vendor = 'Other' }
+            $name = [string]$best.Name
+            $vendor = Get-GpuVendor $name
             try { $vramMB = [int]([math]::Round($best.AdapterRAM / 1MB)) } catch { }
+            # WMI 的 AdapterRAM 对大于 4GB 的卡不可靠（A 卡尤其明显）：改读注册表 qwMemorySize
+            $vramMB = Get-VramFromRegistry $name $vramMB
             if ($vramMB -le 0) { $vramMB = 0 }
             try { $driverVer = [string]$best.DriverVersion } catch { }
         }
@@ -870,17 +940,18 @@ function Recommend($hw) {
     $vramGB = [math]::Round($hw.VramMB / 1024, 1)
     $buildWhy = ''
     $build = 'nvidia'
-    if ($hw.Vendor -eq 'NVIDIA') { $build = 'nvidia'; $buildWhy = 'NVIDIA 显卡：用 NVIDIA 分支（wave32 兼容最好）' }
-    elseif ($hw.Vendor -eq 'AMD') { $build = 'amd'; $buildWhy = 'AMD 显卡：用上游主线（原生 wave64，无需模拟）' }
-    elseif ($hw.Vendor -eq 'Intel') { $build = 'unknown'; $buildWhy = 'Intel 显卡：不支持（需要 RDNA2/NVIDIA 桌面卡）' }
-    else { $build = 'unknown'; $buildWhy = '未知显卡：按 NVIDIA 分支尝试' }
+    if ($hw.Vendor -eq 'NVIDIA') { $build = 'nvidia'; $buildWhy = 'N 卡（NVIDIA）：用 NVIDIA 分支（wave32 兼容最好）' }
+    elseif ($hw.Vendor -eq 'AMD') { $build = 'amd'; $buildWhy = 'A 卡（AMD/Radeon）：用上游主线（原生 wave64，无需模拟）' }
+    elseif ($hw.Vendor -eq 'Intel') { $build = 'unknown'; $buildWhy = 'Intel 核显：不支持（需要 AMD RDNA2/NVIDIA 独显）；若有独显请确认它没被核显顶掉' }
+    else { $build = 'unknown'; $buildWhy = '未知显卡：先按 NVIDIA 分支尝试，A 卡请手动选上游主线' }
 
+    # A 卡显存普遍大（WMI 会截断到 4GB，已改读注册表），档位按显存给
     $height = 540
-    if ($vramGB -ge 12) { $height = 1080 }
+    if ($vramGB -ge 20) { $height = 1440 }
+    elseif ($vramGB -ge 12) { $height = 1080 }
     elseif ($vramGB -ge 10) { $height = 720 }
     elseif ($vramGB -ge 7) { $height = 540 }
     else { $height = 480 }
-    if ($hw.Vendor -eq 'AMD' -and $vramGB -ge 12) { $height = 1080 }
 
     $console = if ($hw.Vendor -eq 'AMD') { 'series-x' } else { 'series-s' }
     $scale = [math]::Round($height / $(if ($console -eq 'series-x') { 2160 } else { 1080 }), 4)
@@ -898,18 +969,25 @@ function Refresh-Hw {
     $script:hw = $hw
     $script:driverVer = [string]$hw.Driver
     $lines = @()
-    $lines += "显卡: $($hw.GpuName)"
-    $lines += "厂商: $($hw.Vendor)    显存: $([math]::Round($hw.VramMB/1024,1)) GB    驱动: $($hw.Driver)"
+    $lines += "使用显卡: $($hw.GpuName)"
+    $lines += "厂商: $($hw.Vendor)（A 卡=AMD/Radeon，N 卡=NVIDIA）    显存: $([math]::Round($hw.VramMB/1024,1)) GB    驱动: $($hw.Driver)"
     $lines += "CPU : $($hw.CpuName)  ($($hw.CpuCores) 核 / $($hw.CpuThreads) 线程)"
     $lines += "内存: $($hw.RamGB) GB"
     $lines += "系统: $($hw.OS)"
-    if ($hw.Gpus.Count -gt 1) { $lines += "其他显示适配器: " + (($hw.Gpus | Select-Object -Skip 1 | ForEach-Object { $_.Name }) -join '; ') }
+    $others = @($hw.Gpus | Where-Object { $_.Name -and $_.Name -ne $hw.GpuName } | ForEach-Object { $_.Name })
+    if ($others.Count -gt 0) { $lines += "其它显示适配器（未使用）: " + ($others -join '; ') }
     $txtHw.Text = $lines -join "`r`n"
 
     $rec = Recommend $hw
     $script:rec = $rec
     $recLines = @()
-    $recLines += "推荐构建: $($rec.Build)（$($rec.BuildWhy)）"
+    $recName = switch ($rec.Build) {
+        'nvidia' { 'NVIDIA 分支（vf-nvidia / vf-nv8gb）' }
+        'amd'    { '上游主线（vf-main / upstream / 7900 / unified）' }
+        default  { '未识别：先试 NVIDIA 分支，A 卡请手动选上游主线' }
+    }
+    $recLines += "推荐构建: $recName"
+    $recLines += "推荐理由: $($rec.BuildWhy)"
     $recLines += "主机模式: $($rec.Console)    渲染分辨率: $($rec.Height)p（渲染缩放 $($rec.Scale)）"
     $recLines += "画质预设: $($rec.Preset)    显存判断: $($rec.VramGB) GB"
     if ($rec.Build -eq 'unknown') { $recLines += '⚠ 该显卡可能无法运行，仍可尝试' }
@@ -949,17 +1027,26 @@ function Find-VictoryBuilds([string]$root) {
 
 # 缓存/存档目录：按构建名约定（与游戏侧 env 一致）
 function Get-BuildDirs([string]$name) {
-    $cacheBase = $tbCacheRoot.Text.Trim()
-    $saveBase = $tbSaveRoot.Text.Trim()
+    $cacheBase = ''
+    $saveBase = ''
+    try { $cacheBase = $tbCacheRoot.Text.Trim() } catch { }
+    try { $saveBase = $tbSaveRoot.Text.Trim() } catch { }
+    # 配置里留空时不能让 Join-Path 抛异常（会变成“选择构建出错: Path 是空值”）
+    if (-not $cacheBase) { $cacheBase = $Root }
+    if (-not $saveBase) { $saveBase = $cacheBase }
     $known = @{
         'vf-nvidia' = @{ Cache = 'cache-nvidia'; Data = 'perf-data' }
         'vf-main'   = @{ Cache = 'cache-upstream'; Data = 'perf-data-up' }
         'cool_fox'  = @{ Cache = 'cache-coolfox'; Data = 'perf-data-cool' }
     }
-    if ($known.ContainsKey($name)) {
-        return @{ Cache = (Join-Path $cacheBase $known[$name].Cache); Data = (Join-Path $saveBase $known[$name].Data) }
+    try {
+        if ($known.ContainsKey($name)) {
+            return @{ Cache = (Join-Path $cacheBase $known[$name].Cache); Data = (Join-Path $saveBase $known[$name].Data) }
+        }
+        return @{ Cache = (Join-Path $cacheBase ("cache-" + $name)); Data = (Join-Path $saveBase ("perf-data-" + $name)) }
+    } catch {
+        return @{ Cache = (Join-Path $Root 'cache'); Data = (Join-Path $Root 'perf-data') }
     }
-    return @{ Cache = (Join-Path $cacheBase ("cache-" + $name)); Data = (Join-Path $saveBase ("perf-data-" + $name)) }
 }
 
 # 面板上的缓存状态：实时重算（预热完成后、启动前、点「检查预热状态」都走这里）
@@ -1437,14 +1524,15 @@ function Apply-BuildScan([string]$root, $found) {
     $script:builds = $found
     Add-Log ("扫描到 {0} 个本地构建" -f $found.Count)
     if ($lstBuilds.Items.Count -gt 0) {
-        $pref = 'vf-main'
-        if ($script:hw) {
-            if ($script:hw.Vendor -eq 'NVIDIA') { $pref = 'vf-nvidia|nvidia' }
-            elseif ($script:hw.Vendor -eq 'AMD') { $pref = 'vf-main|upstream|7900' }
-        }
+        # N 卡优先 vf-nvidia，其次 nvidia / nv8gb；A 卡优先上游主线（原生 wave64）
+        $prefs = @('vf-nvidia', 'nvidia', 'nv8gb')
+        if ($script:hw -and $script:hw.Vendor -eq 'AMD') { $prefs = @('vf-main', 'upstream', '7900', 'unified', 'victory-main') }
         $idx = -1
-        for ($i = 0; $i -lt $found.Count; $i++) {
-            if ($found[$i].Name -match $pref) { $idx = $i; break }
+        foreach ($pat in $prefs) {
+            for ($i = 0; $i -lt $found.Count; $i++) {
+                if ($found[$i].Name -match $pat) { $idx = $i; break }
+            }
+            if ($idx -ge 0) { break }
         }
         if ($idx -lt 0) { $idx = 0 }
         $lstBuilds.SelectedIndex = $idx
@@ -1454,6 +1542,11 @@ function Apply-BuildScan([string]$root, $found) {
 
 # 从引擎日志里取信息（引擎输出可能变，取到了就当补充，取不到也不影响判定）
 function Read-WarmLine([string]$line) {
+    # 旧版 victory.exe 没有 warm / shaders 子命令：clap 会直接报 unrecognized subcommand
+    if ($line -match "unrecognized subcommand '([A-Za-z0-9_-]+)'" -or $line -match "invalid subcommand '([A-Za-z0-9_-]+)'") {
+        $script:warmUnsupported = $matches[1]
+        return
+    }
     if ($line -match '(\d+)\s+pipelines known,\s*(\d+)\s+made before\s*\(([0-9a-fA-F]+)\),\s*(\d+)\s+bad;\s*(\d+)\s+to make') {
         $script:warmKnown = [int]$matches[1]
         $script:warmFp = $matches[3]
@@ -1494,11 +1587,13 @@ function Save-WarmRecord([string]$kind, $outcome, [switch]$Quiet) {
             $mk.PipesLines = [int]$post.PipesLines
             # 只有这次真的全部编译完才算完成；之前完成过的不降级
             if ([bool]$outcome.Complete) { $mk.PipesComplete = $true }
+            $mk.PipesUnsupported = [bool]($script:warmUnsupported -eq 'warm')
         } else {
             $mk.ShadersDone = [bool]$outcome.Done
             $mk.ShadersTime = $now
             if ($script:warmShaders -gt 0) { $mk.ShadersCount = [int]$script:warmShaders }
             if ([bool]$outcome.Complete) { $mk.ShadersComplete = $true }
+            $mk.ShadersUnsupported = [bool]($script:warmUnsupported -eq 'shaders')
         }
         Save-WarmMarker $cacheDir $mk
         # 旧版 builds-meta.json 一并写（老版本启动器/脚本读它）
@@ -1559,9 +1654,16 @@ function Update-Warm {
         $post = Get-WarmArtifacts $script:warmCacheDir $script:warmFp
         $pre = $script:warmPre
         if (-not $pre) { $pre = [pscustomobject]@{ PipesLines = 0; ShaderFiles = 0 } }
-        $outcome = Get-WarmOutcome $kind $code $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne ''))
+        $outcome = Get-WarmOutcome $kind $code $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne '')) ([int]$post.MissingEarly)
         Add-Log ("  判定: done={0} complete={1} — {2}" -f $outcome.Done, $outcome.Complete, $outcome.Note)
-        if ($outcome.Done) { [void](Save-WarmRecord $kind $outcome) }
+        if ($script:warmUnsupported) {
+            $sub = $script:warmUnsupported
+            $what = if ($sub -eq 'warm') { '管线预编译' } elseif ($sub -eq 'shaders') { '着色器翻译' } else { $sub }
+            Add-Log ("这个构建的 victory.exe 不认识 `"{0}`" 子命令（{1}做不了，旧版构建）" -f $sub, $what)
+            Add-Log '  解决：换 20261126a/b 分发包，或自己编译一份新构建（新版 victory 才有 warm / shaders 子命令）'
+            $lblStatus.Text = ('这个构建不支持' + $what + '（旧版 victory.exe）')
+            if ($kind -ne 'all') { [void](Save-WarmRecord $kind ([pscustomobject]@{ Done = $true; Complete = $false; Note = '构建不支持该子命令' })) }
+        } elseif ($outcome.Done) { [void](Save-WarmRecord $kind $outcome) }
         $script:autoStage = if ($kind -eq 'all') { [int]$script:autoStage } else { 0 }
         if ($kind -eq 'all' -and $script:autoStage -eq 0) {
             # 着色器阶段记录完再继续管线（即使管线阶段失败/被停止，着色器记录也不会丢）
@@ -1574,7 +1676,7 @@ function Update-Warm {
         if ($outcome.Complete) { $progress.Value = 100 }
         $btnWarmAll.Enabled = $true; $btnWarmShaders.Enabled = $true; $btnWarmPipes.Enabled = $true
         $btnStop.Enabled = $false; $btnLaunch.Enabled = $true
-        if (-not $outcome.Done) {
+        if (-not $outcome.Done -and -not $script:warmUnsupported) {
             $lblStatus.Text = '预热没有产出，请查看日志'
             Add-Log '预热没有产出：缓存文件没有变化（退出码/日志见上）'
         }
@@ -1601,7 +1703,7 @@ function Stop-Warm {
             $post = Get-WarmArtifacts $script:warmCacheDir $script:warmFp
             $pre = $script:warmPre
             if (-not $pre) { $pre = [pscustomobject]@{ PipesLines = 0; ShaderFiles = 0 } }
-            $outcome = Get-WarmOutcome $kind 1 $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne ''))
+            $outcome = Get-WarmOutcome $kind 1 $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne '')) ([int]$post.MissingEarly)
             if ($outcome.Done) {
                 [void](Save-WarmRecord $kind $outcome -Quiet)
                 Add-Log ("已记录中断前的预热结果: {0}" -f $outcome.Note)
@@ -2837,7 +2939,7 @@ $form.Add_FormClosing({
             $post = Get-WarmArtifacts $script:warmCacheDir $script:warmFp
             $pre = $script:warmPre
             if (-not $pre) { $pre = [pscustomobject]@{ PipesLines = 0; ShaderFiles = 0 } }
-            $outcome = Get-WarmOutcome $script:warmKind 1 $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne ''))
+            $outcome = Get-WarmOutcome $script:warmKind 1 $script:warmToMake $script:warmShaders ([int]$pre.PipesLines) ([int]$post.PipesLines) ([int]$pre.ShaderFiles) ([int]$post.ShaderFiles) ([bool]($script:warmFp -ne '')) ([int]$post.MissingEarly)
             if ($outcome.Done) { [void](Save-WarmRecord $script:warmKind $outcome -Quiet) }
         }
     } catch { }
@@ -3438,6 +3540,76 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             try { if ($tmp -and (Test-Path $tmp)) { Remove-Item $tmp -Recurse -Force -EA SilentlyContinue } } catch { }
             try { if ($script:metaPath -ne (Join-Path $Root 'builds-meta.json')) { $script:metaPath = Join-Path $Root 'builds-meta.json' } } catch { }
         }
+        # --- 旧版构建（victory.exe 没有 warm 子命令）：日志要能认出来，状态要说得明白
+            $script:warmUnsupported = ''
+            Read-WarmLine "error: unrecognized subcommand 'warm'"
+            Read-WarmLine 'Usage: victory.exe <COMMAND>'
+            $okU = ($script:warmUnsupported -eq 'warm')
+            if ($okU) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] unsupported-subcommand detected: {1}" -f $(if ($okU) { 'PASS' } else { 'FAIL' }), $script:warmUnsupported)
+
+            $mkU = $null
+            $cU = Join-Path $env:TEMP ('gta6-unsup-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            try {
+                foreach ($i in 0..39) { New-Item -ItemType Directory -Force -Path (Join-Path $cU ("shaders\{0:x2}" -f $i)) | Out-Null }
+                Set-Content -Path (Join-Path $cU 'shaders\00\x1') -Value 'x' -Encoding ASCII
+                New-Item -ItemType Directory -Force -Path (Join-Path $cU 'pipelines') | Out-Null
+                Set-Content -Path (Join-Path $cU 'pipelines\warm-done.txt') -Value 'bbbb000000000000 k1' -Encoding ASCII
+                $mkU = New-WarmRecord
+                $mkU.Project = $proj; $mkU.Exe = $exe; $mkU.Commit = 'commitA'; $mkU.Translator = $trId; $mkU.Driver = '566.03'
+                $mkU.ShadersDone = $true; $mkU.ShadersComplete = $true; $mkU.ShadersTime = (Get-Date).ToString('o')
+                $mkU.PipesDone = $true; $mkU.PipesComplete = $true; $mkU.PipesFingerprint = 'bbbb000000000000'; $mkU.PipesTime = (Get-Date).ToString('o')
+                $mkU.PipesUnsupported = $true
+                Save-WarmMarker $cU $mkU
+                $sU = Get-CacheState $proj $exeTime $trId $cU 'commitA' $exe '566.03'
+                $okU2 = ($sU.State -eq 'partial') -and ($sU.Text -match '不支持管线预编译')
+            } catch { $okU2 = $false; $lines += ("  unsupported-state ERR: " + $_.Exception.Message) }
+            finally { try { if (Test-Path $cU) { Remove-Item $cU -Recurse -Force -EA SilentlyContinue } } catch { } }
+            if ($okU2) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] unsupported-state -> {1} | {2}" -f $(if ($okU2) { 'PASS' } else { 'FAIL' }), $(if ($sU) { $sU.State } else { 'null' }), $(if ($sU) { $sU.Text } else { '' }))
+
+            # --- 跑完的预热要记成「完成」（现在按差集判定，而不是按开始时还有几条要做）
+            $oW = Get-WarmOutcome 'pipelines' 0 500 0 3 520 1 1 $true 0
+            $oW2 = Get-WarmOutcome 'pipelines' 0 500 0 3 520 1 1 $true 7
+            $okOutcome2 = ($oW.Done -and $oW.Complete) -and ($oW2.Done -and -not $oW2.Complete)
+            if ($okOutcome2) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] outcome-by-missing complete={1} partial={2} | {3}" -f $(if ($okOutcome2) { 'PASS' } else { 'FAIL' }), $oW.Complete, $oW2.Note, $oW.Note)
+
+            # --- A 卡 / N 卡都要认（含「核显 + 独显」的机器）
+        $igpu = [pscustomobject]@{ Name = 'Intel(R) UHD Graphics 770'; AdapterRAM = 2147483648; DriverVersion = '32.0.101.5860' }
+        $nvCard = [pscustomobject]@{ Name = 'NVIDIA GeForce RTX 3070'; AdapterRAM = 8589934592; DriverVersion = '621.24' }
+        $amdCard = [pscustomobject]@{ Name = 'AMD Radeon RX 7900 XTX'; AdapterRAM = 0; DriverVersion = '32.0.21025.10016' }
+        $svgV = @(
+            ((Get-GpuVendor 'AMD Radeon RX 7900 XTX') -eq 'AMD'),
+            ((Get-GpuVendor 'NVIDIA GeForce RTX 3070 Ti Laptop GPU') -eq 'NVIDIA'),
+            ((Get-GpuVendor 'Intel(R) UHD Graphics 630') -eq 'Intel'),
+            ((Get-GpuVendor 'Microsoft Basic Display Adapter') -eq 'Other')
+        )
+        $okV = ($svgV -notcontains $false)
+        if ($okV) { $pass++ } else { $fail++ }
+        $lines += ("[{0}] vendor-names amd/nv/intel/other" -f $(if ($okV) { 'PASS' } else { 'FAIL' }))
+
+        $pick1 = Select-BestGpu @($igpu, $amdCard)
+        $pick2 = Select-BestGpu @($igpu, $nvCard)
+        $pick3 = Select-BestGpu @($igpu)
+        $okPick = ($pick1 -and (Get-GpuVendor $pick1.Name) -eq 'AMD') -and ($pick2 -and (Get-GpuVendor $pick2.Name) -eq 'NVIDIA') -and ($pick3 -and (Get-GpuVendor $pick3.Name) -eq 'Intel')
+        if ($okPick) { $pass++ } else { $fail++ }
+        $lines += ("[{0}] igpu+amd -> {1} | igpu+nv -> {2} | igpu-only -> {3}" -f $(if ($okPick) { 'PASS' } else { 'FAIL' }), $pick1.Name, $pick2.Name, $pick3.Name)
+
+        $recAmd = Recommend ([pscustomobject]@{ Vendor = 'AMD'; VramMB = 24576 })
+        $recNv = Recommend ([pscustomobject]@{ Vendor = 'NVIDIA'; VramMB = 8192 })
+        $recIntel = Recommend ([pscustomobject]@{ Vendor = 'Intel'; VramMB = 2048 })
+        $okRec = ($recAmd.Build -eq 'amd') -and ($recAmd.Console -eq 'series-x') -and ($recAmd.Height -ge 1080) -and
+                 ($recNv.Build -eq 'nvidia') -and ($recNv.Console -eq 'series-s') -and ($recNv.Height -eq 540) -and
+                 ($recIntel.Build -eq 'unknown')
+        if ($okRec) { $pass++ } else { $fail++ }
+        $lines += ("[{0}] recommend amd={1}/{2}p/{3} nv={4}/{5}p/{6} intel={7}" -f $(if ($okRec) { 'PASS' } else { 'FAIL' }), $recAmd.Build, $recAmd.Height, $recAmd.Console, $recNv.Build, $recNv.Height, $recNv.Console, $recIntel.Build)
+
+        $vramReg = Get-VramFromRegistry 'AMD Radeon RX 7900 XTX' 0
+        $okReg = ($null -ne $vramReg) -and ($vramReg -ge 0)
+        if ($okReg) { $pass++ } else { $fail++ }
+        $lines += ("[{0}] vram-registry -> {1} MB" -f $(if ($okReg) { 'PASS' } else { 'FAIL' }), $vramReg)
+
         $lines += ("RESULT: pass={0} fail={1}" -f $pass, $fail)
         Set-Content -Path $env:GTA6_LAUNCHER_CACHETEST -Value ($lines -join "`r`n") -Encoding UTF8
         $form.Close()
@@ -3469,5 +3641,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.1 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.2 by DKTTT'
 [void]$form.ShowDialog()
