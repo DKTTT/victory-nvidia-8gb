@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.2
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.3
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -13,6 +13,7 @@ if (-not $script:mutex.WaitOne(0)) {
 }
 
 $ErrorActionPreference = 'Continue'
+$ProgressPreference = 'SilentlyContinue'   # 下载时不弹蓝色进度条
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $Root 'launcher-config.json'
 
@@ -821,6 +822,7 @@ $script:warmPre = $null
 $script:autoStage = 0
 $script:bgProc = $null
 $script:bgJob = $null
+$script:rootFallbackWarned = $false
 $script:updateCtx = $null
 $script:checkCtx = $null
 $script:updateCompile = $false
@@ -1026,27 +1028,71 @@ function Find-VictoryBuilds([string]$root) {
 
 
 # 缓存/存档目录：按构建名约定（与游戏侧 env 一致）
+# 纯字符串拼路径：不碰文件系统，盘符不存在也不会报错（Join-Path 会抛 DriveNotFoundException）
+function Combine-Path([string]$base, [string]$leaf) {
+    try {
+        if (-not $base) { $base = $Root }
+        return [System.IO.Path]::Combine($base, $leaf)
+    } catch {
+        return [System.IO.Path]::Combine($Root, $leaf)
+    }
+}
+
+# 配置里的盘还在不在（U 盘/移动盘/换机器时 D: 以外的盘可能不存在）
+function Test-RootUsable([string]$path) {
+    if (-not $path) { return $false }
+    try {
+        $full = [System.IO.Path]::GetFullPath($path)
+        $root = [System.IO.Path]::GetPathRoot($full)
+        if (-not $root) { return $false }
+        return (Test-Path $root)
+    } catch { return $false }
+}
+
 function Get-BuildDirs([string]$name) {
     $cacheBase = ''
     $saveBase = ''
     try { $cacheBase = $tbCacheRoot.Text.Trim() } catch { }
     try { $saveBase = $tbSaveRoot.Text.Trim() } catch { }
-    # 配置里留空时不能让 Join-Path 抛异常（会变成“选择构建出错: Path 是空值”）
     if (-not $cacheBase) { $cacheBase = $Root }
     if (-not $saveBase) { $saveBase = $cacheBase }
+    # 盘不存在（比如配置里写着 E:\gta6，但这台机器只有 D:）→ 回退到启动器目录下，并提示一次
+    if (-not (Test-RootUsable $cacheBase)) {
+        $fallback = Combine-Path $Root 'gta6'
+        if (-not $script:rootFallbackWarned) {
+            $script:rootFallbackWarned = $true
+            Add-Log ("缓存根目录 {0} 所在的盘不存在，暂时改用 {1}（可在①页改掉）" -f $cacheBase, $fallback)
+        }
+        $cacheBase = $fallback
+    }
+    if (-not (Test-RootUsable $saveBase)) {
+        $fallback = Combine-Path (Combine-Path $Root 'gta6') 'work'
+        if (-not $script:rootFallbackWarned) {
+            $script:rootFallbackWarned = $true
+            Add-Log ("存档根目录 {0} 所在的盘不存在，暂时改用 {1}（可在①页改掉）" -f $saveBase, $fallback)
+        }
+        $saveBase = $fallback
+    }
     $known = @{
         'vf-nvidia' = @{ Cache = 'cache-nvidia'; Data = 'perf-data' }
         'vf-main'   = @{ Cache = 'cache-upstream'; Data = 'perf-data-up' }
         'cool_fox'  = @{ Cache = 'cache-coolfox'; Data = 'perf-data-cool' }
     }
-    try {
-        if ($known.ContainsKey($name)) {
-            return @{ Cache = (Join-Path $cacheBase $known[$name].Cache); Data = (Join-Path $saveBase $known[$name].Data) }
-        }
-        return @{ Cache = (Join-Path $cacheBase ("cache-" + $name)); Data = (Join-Path $saveBase ("perf-data-" + $name)) }
-    } catch {
-        return @{ Cache = (Join-Path $Root 'cache'); Data = (Join-Path $Root 'perf-data') }
+    if ($known.ContainsKey($name)) {
+        return @{ Cache = (Combine-Path $cacheBase $known[$name].Cache); Data = (Combine-Path $saveBase $known[$name].Data) }
     }
+    return @{ Cache = (Combine-Path $cacheBase ("cache-" + $name)); Data = (Combine-Path $saveBase ("perf-data-" + $name)) }
+}
+
+# 这个构建支持哪些预热步骤（旧版 victory.exe 没有 warm / shaders 子命令）
+function Get-BuildWarmCapability([string]$exe) {
+    $sh = Test-ExeSub $exe 'shaders'
+    $pi = Test-ExeSub $exe 'warm'
+    $text = if ($sh -and $pi) { '' }
+            elseif ($sh) { '该构建只支持着色器预热，不支持管线预编译' }
+            elseif ($pi) { '该构建只支持管线预编译，不支持着色器预热' }
+            else { '该构建不支持预热（victory.exe 没有 shaders / warm 子命令，旧版构建）' }
+    return [pscustomobject]@{ Shaders = [bool]$sh; Pipes = [bool]$pi; None = (-not $sh -and -not $pi); Text = $text }
 }
 
 # 面板上的缓存状态：实时重算（预热完成后、启动前、点「检查预热状态」都走这里）
@@ -1060,11 +1106,26 @@ function Update-CacheStateLabel {
     $script:projInfo = $info
     $trId = Get-TranslatorId $b.Project $b.Exe
     $cache = Get-CacheState $b.Project $b.Time $trId $script:cacheDir $info.Commit $b.Exe $script:driverVer
+    # 构建自己不支持预热：直接说清楚，别等点了才说“没产出”
+    $cap = Get-BuildWarmCapability $b.Exe
+    if ($cap.Text) {
+        $cache.State = 'unsupported'
+        $cache.Text = $cap.Text
+        try { $lblStatus.Text = $cap.Text } catch { }
+        try {
+            if ($lstBuilds.SelectedIndex -ge 0 -and $lstBuilds.Items.Count -gt $lstBuilds.SelectedIndex) {
+                $item = [string]$lstBuilds.Items[$lstBuilds.SelectedIndex]
+                if ($item -notmatch '不支持预热') {
+                    $lstBuilds.Items[$lstBuilds.SelectedIndex] = $item + '  [不支持预热]'
+                }
+            }
+        } catch { }
+    }
     $script:cacheState = $cache
     $ver = if ($info.Git) { "$($info.Branch)@$($info.Commit)" } else { '非 git 工程' }
     $tr = if ($trId) { "翻译器 $trId" } else { '翻译器指纹未知' }
     $lblBuildInfo.Text = "已选: $($script:buildName)  |  $ver  |  $tr  |  $($cache.Text)"
-    return [pscustomobject]@{ State = $cache; Info = $info; TrId = $trId; Ver = $ver; Tr = $tr; Build = $b }
+    return [pscustomobject]@{ State = $cache; Info = $info; TrId = $trId; Ver = $ver; Tr = $tr; Build = $b; Cap = $cap }
 }
 
 function Test-CacheStateNow {
@@ -1076,7 +1137,9 @@ function Test-CacheStateNow {
         Add-Log ("检查预热状态: {0} | {1}" -f $cs.State, $cs.Text)
         foreach ($d in $cs.Details) { Add-Log ("  " + $d) }
         $lblStatus.Text = $cs.Text
-        if ($cs.State -eq 'never' -or $cs.State -eq 'stale') {
+        if ($cs.State -eq 'unsupported') {
+            Add-Log '这个 victory.exe 是旧版：换 20261126a/b 分发包，或用「更新并编译」升到含 warm 的版本'
+        } elseif ($cs.State -eq 'never' -or $cs.State -eq 'stale') {
             Add-Log '建议：点「全部预热」（着色器 → 管线），完成后这里会显示“缓存就绪”'
         }
     } catch { Add-Log ("检查预热状态失败: " + $_.Exception.Message) }
@@ -1102,6 +1165,47 @@ function Select-Build {
 
 # ---------------------------------------------------------------- 环境与启动
 $script:exeCapCache = @{}
+$script:subCache = @{}
+# 解析 `victory --help` 的输出，判断某个子命令在不在（true/false；null = 看不出来）
+function Test-HelpTextFor([string]$text, [string]$sub) {
+    if (-not $text) { return $null }
+    if ($text -match '(?im)unrecognized subcommand|invalid subcommand|not recognized|unknown command|unexpected argument') { return $false }
+    if ($text -match ('(?im)^\s{0,6}' + [regex]::Escape($sub) + '\b')) { return $true }
+    if ($text -match '(?im)^\s*Commands:') { return $false }
+    return $null
+}
+
+# 这个 exe 支不支持某个子命令（旧版 victory.exe 没有 warm / shaders）。
+# 跑一次 `exe --help`（clap 在 GPU 初始化之前就退出，实测 ~140ms），结果按 exe 缓存。
+function Test-ExeSub([string]$exe, [string]$sub) {
+    if (-not $exe -or -not (Test-Path $exe)) { return $true }
+    $key = (Get-NormPath $exe) + '|' + $sub
+    if ($script:subCache.ContainsKey($key)) { return $script:subCache[$key] }
+    $res = $true
+    $out = ''
+    $err = ''
+    try {
+        $fi = Get-Item $exe
+        $tag = [guid]::NewGuid().ToString('N').Substring(0, 6)
+        $out = Join-Path $env:TEMP ("gta6-help-$tag.out.txt")
+        $err = $out + '.err.txt'
+        Remove-Item $out, $err -EA SilentlyContinue
+        $p = Start-Process -FilePath $exe -ArgumentList @('--help') -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -WindowStyle Hidden
+        if (-not $p.WaitForExit(6000)) { try { $p.Kill() } catch { } }
+        $text = ''
+        try { $text = [string](Get-Content $out -Raw -EA SilentlyContinue) + "`n" + [string](Get-Content $err -Raw -EA SilentlyContinue) } catch { }
+        $verdict = Test-HelpTextFor $text $sub
+        if ($null -ne $verdict) { $res = [bool]$verdict }
+    } catch {
+        $res = $true   # 探测失败就当支持，避免误伤
+    } finally {
+        try { Remove-Item $out, $err -Force -EA SilentlyContinue } catch { }
+    }
+    if ($script:subCache.Count -gt 100) { $script:subCache.Clear() }
+    $script:subCache[$key] = $res
+    return $res
+}
+
 function Test-BuildSupportsRenderScale([string]$exePath) {
     try {
         if (-not $exePath -or -not (Test-Path $exePath)) { return $false }
@@ -1236,7 +1340,33 @@ function Start-Warm([string]$kind) {
     try {
         if ($script:proc -and -not $script:proc.HasExited) { Add-Log '预热已在运行'; return }
         if (-not $script:exe) { Add-Log '请先选择构建'; return }
-        $rpf = Join-Path $tbGame.Text.Trim() 'shaders.rpf'
+        # 先问 exe 支不支持这些子命令：旧版 victory.exe 没有 warm / shaders，点了也是白点
+        $cap = Get-BuildWarmCapability $script:exe
+        $canShaders = $cap.Shaders
+        $canPipes = $cap.Pipes
+        if ($kind -eq 'pipelines' -and -not $canPipes) {
+            $lblStatus.Text = '该构建不支持预热（管线预编译）'
+            Add-Log ("预热[{0}] 跳过：{1}" -f $kind, $cap.Text)
+            Add-Log '  → 换 20261126a/b 分发包，或用「更新并编译」把构建升到含 warm 的版本'
+            return
+        }
+        if ($kind -eq 'shaders' -and -not $canShaders) {
+            $lblStatus.Text = '该构建不支持预热（着色器翻译）'
+            Add-Log ("预热[{0}] 跳过：{1}" -f $kind, $cap.Text)
+            Add-Log '  → 换 20261126a/b 分发包，或用「更新并编译」把构建升到含 shaders 的版本'
+            return
+        }
+        if ($kind -eq 'all') {
+            if ($cap.None) {
+                $lblStatus.Text = '该构建不支持预热'
+                Add-Log ("该构建不支持预热：{0}" -f $cap.Text)
+                Add-Log '  → 换 20261126a/b 分发包，或用「更新并编译」把构建升到新版本'
+                return
+            }
+            if (-not $canShaders) { Add-Log '该构建不支持着色器翻译：跳过，只做管线预编译'; $kind = 'pipelines' }
+            elseif (-not $canPipes) { Add-Log '该构建不支持管线预编译：只做着色器翻译'; $kind = 'shaders' }
+        }
+        $rpf = Combine-Path $tbGame.Text.Trim() 'shaders.rpf'
         if ($kind -ne 'pipelines' -and -not (Test-Path $rpf)) { Add-Log "找不到 $rpf"; return }
         $null = Build-Env
         [void](Clear-StaleWarmProcs)
@@ -1724,6 +1854,11 @@ function Test-LaunchCacheGate($cs, [switch]$NoPrompt) {
     if (-not $cs) { return $true }
     Add-Log ("缓存状态: {0} | {1}" -f $cs.State, $cs.Text)
     foreach ($d in $cs.Details) { Add-Log ("  " + $d) }
+    if ($cs.State -eq 'unsupported') {
+        # 构建自己不支持预热：不用拦启动，但要说明白
+        Add-Log ('提示: ' + $cs.Text + '（仍可直接启动，游戏会边跑边编译）')
+        return $true
+    }
     if ($cs.State -eq 'never' -or $cs.State -eq 'stale') {
         $tip = if ($cs.State -eq 'never') { '点「全部预热」一次，之后就不用再预热了。' } else { '重新「全部预热」即可；旧缓存不会被删。' }
         if ($NoPrompt) { return $false }
@@ -1746,7 +1881,7 @@ function Launch-Game {
         }
         if (-not (Test-LaunchCacheGate)) { return }
         $envInfo = Build-Env
-        $gameExe = Join-Path $tbGame.Text.Trim() 'game_scarlett_master.exe'
+        $gameExe = Combine-Path $tbGame.Text.Trim() 'game_scarlett_master.exe'
         if (-not (Test-Path $gameExe)) { Add-Log "找不到游戏: $gameExe"; return }
         Save-Cfg
         Add-Log ("启动: {0} / {1} / {2}p (scale {3})" -f $script:buildName, $envInfo.Console, $envInfo.Height, $envInfo.Scale)
@@ -2452,7 +2587,7 @@ function Find-CargoRoot([string]$dir) {
 function Register-Prebuilt([string]$exePath, [string]$repo) {
     try {
         $name = ($repo -replace '[/:.]', '_')
-        $dst = Join-Path $tbDlDir.Text.Trim (Join-Path $name 'target\release')
+        $dst = Combine-Path $tbDlDir.Text.Trim (Combine-Path $name 'target\release')
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
         Copy-Item $exePath (Join-Path $dst 'victory.exe') -Force
         Add-Log ("已登记预编译 exe: {0}" -f (Join-Path $dst 'victory.exe'))
@@ -2500,7 +2635,7 @@ function Build-And-Deploy([string]$cargo) {
         Add-Log ("编译成功: {0} ({1:N1} MB)" -f $exe.FullName, ($exe.Length/1MB))
         # 复制到规范路径，确保扫描器能找到并可直接使用
         $repoName = Split-Path $cargo -Leaf
-        $dst = Join-Path $tbDlDir.Text.Trim (Join-Path $repoName 'target\release')
+        $dst = Combine-Path $tbDlDir.Text.Trim (Combine-Path $repoName 'target\release')
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
         Copy-Item $exe.FullName (Join-Path $dst 'victory.exe') -Force
         Add-Log ("已部署: {0}" -f (Join-Path $dst 'victory.exe'))
@@ -3575,6 +3710,40 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
             if ($okOutcome2) { $pass++ } else { $fail++ }
             $lines += ("[{0}] outcome-by-missing complete={1} partial={2} | {3}" -f $(if ($okOutcome2) { 'PASS' } else { 'FAIL' }), $oW.Complete, $oW2.Note, $oW.Note)
 
+            # --- 盘符不存在时拼路径不能炸（用户机器只有 D:，配置里却是 E:\gta6）
+            $okPath = ((Test-RootUsable 'Z:\gta6') -eq $false) -and ((Test-RootUsable 'E:\gta6') -eq $true) -and ((Combine-Path 'Z:\gta6' 'cache') -eq 'Z:\gta6\cache')
+            if ($okPath) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] missing-drive-safe combine={1} usableZ={2}" -f $(if ($okPath) { 'PASS' } else { 'FAIL' }), (Combine-Path 'Z:\gta6' 'cache'), (Test-RootUsable 'Z:\gta6'))
+            # --- 「这个构建支不支持预热」的判定（选中就提示，不用等点了才说没产出）
+            $helpOk = "Commands:`n  shaders      Translate every shader found...`n  warm         Make the host pipelines..."
+            $helpBad = "error: unrecognized subcommand 'warm'`n`nUsage: victory.exe <COMMAND>"
+            $okH = ((Test-HelpTextFor $helpOk 'warm') -eq $true) -and
+                   ((Test-HelpTextFor $helpBad 'warm') -eq $false) -and
+                   ((Test-HelpTextFor "$helpOk" 'shaders') -eq $true) -and
+                   ($null -eq (Test-HelpTextFor '' 'warm'))
+            if ($okH) { $pass++ } else { $fail++ }
+            $lines += ("[{0}] help-text parse warm/shaders" -f $(if ($okH) { 'PASS' } else { 'FAIL' }))
+
+            $fakeDir = Join-Path $env:TEMP ('gta6-fakebuild-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            try {
+                New-Item -ItemType Directory -Force -Path $fakeDir | Out-Null
+                $oldExe = Join-Path $fakeDir 'victory-old.bat'
+                Set-Content -Path $oldExe -Value "@echo off`r`necho error: unrecognized subcommand 'warm'`r`nexit /b 2" -Encoding ASCII
+                $newExe = Join-Path $fakeDir 'victory-new.bat'
+                Set-Content -Path $newExe -Value "@echo off`r`necho Commands:`r`necho   shaders   translate all shaders`r`necho   warm      make host pipelines`r`nexit /b 0" -Encoding ASCII
+                $capOld = Get-BuildWarmCapability $oldExe
+                $capNew = Get-BuildWarmCapability $newExe
+                $okCap = ($capOld.None -eq $true) -and ($capOld.Text -match '不支持预热') -and
+                         ($capNew.Shaders -eq $true) -and ($capNew.Pipes -eq $true) -and (-not $capNew.Text)
+                if ($okCap) { $pass++ } else { $fail++ }
+                $lines += ("[{0}] capability old=None({1}) new=sh+pipe({2})" -f $(if ($okCap) { 'PASS' } else { 'FAIL' }), $capOld.Text, $capNew.Pipes)
+            } catch {
+                $fail++
+                $lines += ("capability ERR: " + $_.Exception.Message)
+            } finally {
+                try { if (Test-Path $fakeDir) { Remove-Item $fakeDir -Recurse -Force -EA SilentlyContinue } } catch { }
+            }
+
             # --- A 卡 / N 卡都要认（含「核显 + 独显」的机器）
         $igpu = [pscustomobject]@{ Name = 'Intel(R) UHD Graphics 770'; AdapterRAM = 2147483648; DriverVersion = '32.0.101.5860' }
         $nvCard = [pscustomobject]@{ Name = 'NVIDIA GeForce RTX 3070'; AdapterRAM = 8589934592; DriverVersion = '621.24' }
@@ -3641,5 +3810,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.2 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.3 by DKTTT'
 [void]$form.ShowDialog()
