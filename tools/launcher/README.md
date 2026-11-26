@@ -1,0 +1,275 @@
+﻿# GTA VI PC 移植 · 自动启动器 v1.0
+
+**作者**: DKTTT  ·  GitHub: https://github.com/DKTTT
+**日期**: 2026-11-26
+**基于**: VIctory 社区项目（avatarmanz/VIctory-7900XTX、trustno1-coder/VIctory-NVIDIA、fxceless/victory-fork、codec-d/cool_fox）
+**仓库**: https://github.com/DKTTT/victory-nvidia-8gb
+
+---自动检测硬件并推荐最合适的构建与画质配置，支持自定义目录、从 GitHub 拉取构建、预热与启动。
+
+## 快速开始
+
+1. 解压本包到任意目录（路径不要有空格/中文问题不大，但建议英文路径）
+2. 双击 `GTA6-Launcher.bat`
+3. 检查「① 设备与配置」页的自动检测结果
+4. 到「② 构建与下载」页选择构建（首次会自动扫描本地构建；没有就下载/编译）
+5. 到「③ 预热与启动」页：先点「全部预热」，完成后再点「启动游戏」
+
+## 自动检测与推荐规则
+
+| 检测项 | 方式 | 影响 |
+|---|---|---|
+| 显卡厂商 | nvidia-smi / Win32_VideoController | NVIDIA → vf-nvidia（构建 1）；AMD → vf-main/上游主线 |
+| 显存 | nvidia-smi 精确值，其它卡用 WMI 估算 | 决定渲染分辨率：<7GB→480p；7~9GB→540p；10~12GB→720p；≥12GB→1080p |
+| CPU / 内存 | WMI | 显示信息（内存 <16GB 建议关后台程序） |
+| 系统 | WMI | 显示信息 |
+
+推荐结果会显示在「推荐配置」框里，可以用页面下方的「主机模式 / 渲染分辨率」手动覆盖。
+
+## 目录设置
+
+| 目录 | 用途 |
+|---|---|
+| 游戏目录 | 含 `game_scarlett_master.exe` 和 `shaders.rpf` 的目录 |
+| 构建根目录 | 存放各个 victory 工程（含 `target/diag/victory.exe` 或 `target/release/victory.exe`）的根目录，启动器会递归扫描 |
+| 缓存根目录 | 着色器/管线缓存；已知构建自动映射：vf-nvidia→cache-nvidia、vf-main→cache-upstream、cool_fox→cache-coolfox |
+| 存档根目录 | 游戏存档与配置；vf-nvidia→perf-data、vf-main→perf-data-up |
+
+所有路径会保存到 `launcher-config.json`，下次打开自动恢复。
+
+## 从 GitHub 下载构建
+
+「② 构建与下载」页：
+
+- **仓库**：`用户名/仓库名`（默认 `DKTTT/victory-nvidia-8gb`）
+- **分支**：默认 `tools-and-patches`
+- **下载源码 ZIP**：下载 `codeload.github.com/仓库/zip/refs/heads/分支` 并解压到「下载到」目录
+- **下载 Release**：读取 GitHub 最新 Release，选 Windows/x64 附件下载
+- **编译选中的源码构建**：调用 `cargo build --profile diag -p victory --features diagnostics`（需要已安装 Rust 工具链）
+
+下载使用系统代理（墙内请先开代理）。下载完成后点「重新扫描本地构建」即可选用。
+
+## 预热与启动
+
+- **预热着色器**：`victory shaders shaders.rpf`（2~5 分钟，可中断续传）
+- **预编译管线**：`victory warm --used`（3~10 分钟，可中断续传）
+- **全部预热**：先着色器，完成后自动接续管线预编译（进度条 + 实时日志 + 停止按钮）
+- **启动游戏**：自动套用渲染缩放（按分辨率换算）、两平面合成修复白屏、纹理等待修复、光追跳过列表等参数
+
+## 常见问题
+
+**Q: 启动后白屏？**
+确认构建是 vf-nvidia / vf-main 且 `VICTORY_COMPOSE=1`（启动器自动设置）。
+
+**Q: 预热很慢？**
+管线预编译受显卡驱动 PSO 编译速度限制，首次 3~10 分钟属正常；中断后下次继续。
+
+**Q: 提示找不到 victory.exe？**
+构建根目录要指向含 `目标工程/target/diag/victory.exe` 的目录；用「重新扫描本地构建」确认。
+
+**Q: 想用自己编译的版本？**
+把工程放在构建根目录下，编译出 `target/diag/victory.exe` 或 `target/release/victory.exe` 后重新扫描即可。
+
+## 已知限制
+
+- Intel 核显/其他显卡不在支持范围（会提示）
+- 自动检测显存对非 NVIDIA 卡可能不准（WMI 4GB 上限问题），可手动改分辨率
+- 从 GitHub 下载源码后需要自备 Rust 工具链才能编译
+## 上游更新管理（新增）
+
+启动器能管理构建的上游更新，避免「更新后白屏/变慢」的坑：
+
+| 功能 | 说明 |
+|---|---|
+| 版本显示 | 选中构建后显示 `分支@commit`、翻译器版本、缓存状态 |
+| 缓存状态 | 检测缓存目录里已有的预热结果；**构建比缓存新**或**翻译器版本变化**会提示「建议重新全部预热」|
+| 检查上游更新 | 对 git 工程执行 `git fetch`（走代理），显示落后多少个提交、上游最新提交 |
+| 更新并编译 | 自动备份当前 exe → `git pull --ff-only` → `cargo build --profile diag` → 标记缓存过期 |
+| 回滚上一版本 | 从 `victory.exe.bak-*` 恢复上一个可用的 exe |
+| 启动前提醒 | 缓存过期时弹窗确认，避免带着旧缓存启动导致卡顿 |
+
+**建议流程**：检查更新 → 更新并编译 → 全部预热 → 启动。更新前启动器会自动留备份，不满意可回滚。
+
+> 已知问题：上游 2026-11-26 的 93 提交版本在 8GB NVIDIA 上实测白屏/崩溃，暂不建议更新。
+
+## 排行榜与自动推荐（新增）
+
+启动器每次打开都会从 **GTA VI PC Race**（`vuyp.github.io/gta6-pc-race`）拉取最新排名：
+
+- 数据源：`https://vuyp.github.io/gta6-pc-race/src/data.json`（每 15 分钟更新一次，48 个项目）
+- 显示：前 25 名的 排名 / 阶段 / 画面分 / 速度分 / 稳定分 / 仓库
+- **本机推荐**：按显卡厂商、显存、速度、稳定性、排名综合打分，列出前 3 个最适合你的项目
+- **本地构建在榜情况**：每个本地构建对应榜上哪个项目、第几名（含已知问题标注）
+- **★ 本地最适合你的构建**：从你已有的构建里挑出最匹配的（自动排除已知白屏的构建）
+- 网络失败时自动使用上次缓存（`race-cache.json`）
+
+> 排行榜数据是各项目自报 + 第三方核实，仅供参考；启动器推荐的是"最适合本机硬件"的项目，不代表一定能玩。
+
+## 键盘映射（新增，⑤ 标签页）
+
+自己绑键：每行一条 `源键 = 目标键`，`#` 开头是注释。
+
+```
+CapsLock = Escape
+F1 = Tab
+W = Up
+```
+
+- 可用键名：`A-Z 0-9 F1-F12 Space Enter Esc Tab Shift Ctrl Alt CapsLock Backspace Up Down Left Right Home End PgUp PgDn Insert Delete Num0-Num9`，也可以直接写 `0x41` 这样的 VK 值
+- **只在游戏窗口聚焦时生效**（不影响打字/浏览器）
+- `Ctrl+Alt+M` 随时开/关映射
+- 勾选「启动游戏时自动开启映射」→ 启动游戏自动启用；关闭启动器自动卸载
+- 实现：系统级低级键盘钩子（`keymap.cs`）；若被杀毒软件拦截会提示安装失败
+
+> 注意：部分游戏用 DirectInput 原始输入时，键盘钩子可能收不到；本游戏（GameInput）实测可用。
+
+## v1.3.1 修复
+
+- **多开检测加强**：以前只检测"有窗口的 victory 进程"，如果另一个实例还在加载（窗口未出现）就拦不住，第二个实例会因缓存/存档文件锁报 `0x80070005（拒绝访问）`。现在检测**任意 victory 进程**，并提示具体 PID。
+- 启动游戏前若检测到残留进程，会弹窗提示先关闭，避免 `0x800005`。
+- 启动前可用任务管理器或命令行 `taskkill /F /IM victory.exe /T` 清理残留。
+
+## v1.4 更新
+
+- **排版修复**：窗口放大到 1120×900，Tab 区域加高，修复底部文字/按钮被裁切、⑤页控件重叠的问题。
+- **排行榜可点击 → 拉取构建**：④ 排行榜列表支持点选（或双击）项目，然后点「拉取选中项目构建」。
+- **不适配提醒**：拉取前检查项目测试硬件与你的配置（厂商/显存）；不匹配时弹窗：
+  `配置可能不适配 … 是=继续，否=取消`。
+- **拉取方式选择**：是=下载源码并编译（自动找默认分支、调 cargo 编译、编译后自动重新扫描构建）；否=只下载源码 ZIP；取消=不拉取。
+- 没有公开仓库的项目（如 CGBJ/ztrx）会提示无法拉取。
+
+> 📖 完整使用手册见 **使用教程-详细版.md**（15 个章节：界面总览/每个按钮/配置文件/疑难排查/性能建议/FAQ）。
+
+## v1.5 更新：排行榜拉取构建（真实可部署）
+
+- **没有 Release 也能拉**：自动检测 Release；没有可用附件时弹窗
+  `没有 Release，是否改为下载源码 ZIP？ 是=下载 否=取消`
+- **格式自适应**：Release 附件支持 `zip / 7z / tar.gz / tgz / exe`（7z 需要装 7-Zip，tar.gz 用系统 tar）；源码 ZIP 自动解压并自动定位工程根目录（Cargo.toml）
+- **自动编译 + 自动部署**：
+  1. 下载源码并解压
+  2. 自动找 Cargo.toml（支持嵌套目录）
+  3. 自动编译：先试 `cargo build --profile diag -p victory --features diagnostics`，失败自动改 `cargo build --release`
+  4. 找到 `target\{diag,release}\victory.exe` 后**复制到规范构建目录并自动登记**
+  5. 自动刷新 ② 构建列表，可直接选它去预热/启动
+- **实测**：拉取 `avatarmanz/VIctory-7900XTX`（无 Release）→ 下载 2.2MB 源码 → 编译 1m35s → 得到 11.2MB `victory.exe` → 构建列表 16→17，可直接使用
+
+## v1.6 更新：崩溃记录 + 满 10 次自动清理
+
+- **每次启动游戏自动记录日志**：输出重定向到 `logs\game-时间.log`（victory 的日志在 `.log.err`）
+- **自动判定崩溃**：Breakpad/minidump、panic、设备移除（0x887A0006 / DXGI_ERROR_DEVICE）、非 0 退出码、启动 10 秒内退出
+- **崩溃记录**：写入 `logs\crashes.jsonl`（时间/原因/构建/主机模式/分辨率/缓存目录/运行秒数/最后 30 行日志），并另存 `crash-时间.log`
+- **③ 页显示崩溃次数**：`崩溃记录：N 次 / 10`
+- **满 10 次自动清理**：crashes.jsonl 归档为 `crashes-archive-时间.jsonl`，游戏日志只保留最近 2 个
+- **「打开日志目录」按钮**：一键打开 `logs` 目录
+
+## v1.7 更新：修复推荐区显示不全 + 推荐项可点击拉取
+
+- **修复显示不全**：旧版把 13 行推荐文字塞进 150px 高的标签，底部「本地构建在榜/★本地最佳」被裁掉。现在改为：
+  - 推荐前 3 名放进**可点击列表**（3 行完整显示）
+  - 本地构建在榜情况压缩为**单行摘要**（超长用 … 截断但不丢关键信息）
+  - 所有控件经程序化校验：页面最大底部 538px < 页面高度 568px，无溢出/无重叠
+- **推荐项可直接拉取**：点选推荐项 → 「拉取选中推荐构建」，或**双击**直接拉取（同样走硬件适配检查 + Release/源码 ZIP 流程）
+- **「打开项目仓库」按钮**：浏览器打开该项目的 GitHub 页面
+
+## v1.7.1 修复：扫描不到本地构建
+
+**原因**：构建根目录设置错误（空/指向不存在的路径/旧配置残留）时，扫描直接返回 0，界面显示空列表。
+
+**修复**：
+- 当前构建根目录扫不到时，**自动尝试常见目录**：`E:\gta6\work`、`D:\gta6\work`、`%USERPROFILE%\gta6\work`、启动器目录\work、启动器目录
+- 找到后自动切换并写回配置，日志显示每个候选目录的扫描结果
+- 全部失败时弹窗明确提示，并告诉你目录应包含的结构：
+  `工程名\target\diag\victory.exe` 或 `工程名\target\release\victory.exe`
+- 扫描深度 6 层，支持下载的源码工程（downloaded\repo-main\...\target\...）
+
+## v1.7.2 修复：任意盘的构建都能扫到（用户实测反馈）
+
+**问题**：用户的构建在 `D:\gta6\work`（不是 E 盘），且很多是 Release 解压版——`victory.exe` 直接放在文件夹里，不在 `target\diag|release\` 结构下，旧扫描器全部漏掉。
+
+**修复**：
+- 扫描器支持 **任意位置的 `victory*.exe`**（排除 target\...\deps、launcher），识别为 `[exe]` 预编译构建
+- 标准 `target\diag|release\victory.exe` 仍显示 `[diag]/[release]`
+- 自动兜底目录扩展：`E:\gta6\work`、`D:\gta6\work`、`%USERPROFILE%\gta6\work`、启动器目录\work、启动器目录，以及 **所有盘符的 `X:\gta6\work` 和 `X:\gta6`**
+- 实测：本机 17 个标准构建 + 10 个预编译 = **27 个构建全部识别**
+
+> 注意：`downloaded\cool_fox-main` 这类是源码 ZIP，没有 victory.exe，需要编译后才会出现（用「拉取选中项目构建」时选编译，或点「编译选中的源码构建」）。
+
+## v1.7.3
+- 修复构建根目录为无效盘符时 Join-Path 报错（改为静默回退）
+- 实测验证：隐藏 E 盘构建目录、构建根目录设为 Z:\nonexistent → 自动切到 D:\gta6\work，正确扫到 [diag] 和 [exe] 两种构建
+
+
+> 📋 完整版本历史见 **CHANGELOG.md**（v1.1 → v1.7.3 每个版本的新增/修复/测试记录）。
+
+## v1.8.0：推荐算法 v2（修正偏差 + 速度 21s → 5s）
+
+旧算法的问题（用户日志证实）：
+1. **只在另一家显卡上测试的项目也会得到 0.3 分**（AMD-only 项目对 NVIDIA 用户不够低）
+2. **显存信息解析过宽**：可能把内存 GB 当成显存，导致 24GB 卡项目不降权
+3. **速度取"最高帧"**：轻场景 30fps 会被当成 6/6，实际重场景可能 5fps
+4. **没测稳定性的项目被当 0 分**（不公平地惩罚在研项目）
+5. **每个项目都跑一次 git 查本地构建** → 推荐耗时 **21 秒**
+
+v2 规则：
+| 因素 | 权重 | 说明 |
+|---|---|---|
+| 厂商匹配 | 4.0 | 只认 `tested.gpu` 里真实出现的厂商；只在另一家测试 = **0 分** |
+| 显存接近 | 2.0 | 从 "with N GB / N GB card" 严格解析；4~32GB 范围；未知=中性 0.5 |
+| 速度 | 1.5 | 用**最低 fps**（最差场景）分档；未知=中性 |
+| 稳定性 | 1.0 | 未测=中性 0.5（不再惩罚） |
+| 画面 | 1.0 | |
+| 8GB 实测证据 | +0.3 | 8GB 用户专属：项目文字提到 8GB 卡实测 |
+| 本地已有构建 | +0.4 | 你本地有对应构建 → 优先推荐可直接用的 |
+| 排名加成 | ≤0.2 | 弱化社区排名噪声 |
+
+速度修复：把"本地仓库→构建名"映射改为**循环前预计算一次**，打分时查表；推荐耗时从 **21 秒降到约 5 秒**。
+
+实测对比（NVIDIA 8GB）：
+- v1.7.3：VI-BR-PORT 7.88 > AnyXboxX 7.85 > ztrx 7.37（#23 与 #2 几乎同分）
+- v1.8.0：VI-BR-PORT 8.31 > victory-unified 8.27 > ztrx 8.14 > AnyXboxX 8.1（都带"厂商匹配+显存接近+8GB实测"），AMD-only 项目降到 3.2~4.25
+
+## v1.8.1：编译不再卡死 GUI + 编译进度可见
+
+**问题**：之前「编译选中的源码构建」/ 拉取构建的编译是**同步阻塞**的（ReadToEnd + WaitForExit 在 UI 线程），编译几分钟界面完全卡死。
+
+**修复**：
+- 编译改为**后台异步进程**（`cargo` 输出重定向到临时日志文件）
+- 主定时器每 500ms 轮询：**状态栏实时显示进度** `编译中… 12:34 | Compiling victory-gpu v0.1.0`
+- 日志框每 3 秒追加一行最新编译输出（`│ ...`）
+- 编译期间**界面可正常操作**（切标签、看排行榜、改设置都不受影响）
+- 编译完成自动部署 + 刷新构建列表；失败自动改 `cargo build --release` 重试
+- 新增「停止编译」可直接取消（代码里 Stop-Compile）
+- 状态栏进度条切换为 Marquee 动画表示进行中
+
+**实测**（AnyXboxX 含 submodule，长编译 90 秒）：
+```
+tick elapsed=1 … elapsed=90（界面每 1 秒持续响应）
+status=编译中… 01:30 | Compiling xma v0.1.0 (third_party/tombox/crates/compat/xma)
+```
+
+### 顺带：编译源码可行性实测（2/2 成功）
+
+| 仓库 | 下载 | 编译 | 产物 |
+|---|---|---|---|
+| avatarmanz/VIctory-7900XTX | 2,216 KB ZIP | 1 分 35 秒 | victory.exe 11.2 MB |
+| Itsbatt/victory-unified | 1,461 KB ZIP | 1 分 20 秒 | victory.exe 8 MB |
+| LooperSalty/AnyXboxX | git clone --recursive（含 tombox submodule） | 进行中（90 秒仍在编译） | — |
+
+两个产物均验证可执行：`victory 0.1.0`。
+
+**新增 submodule 支持**：源码 ZIP 不含 git 子模块内容（如 AnyXboxX 的 `third_party/tombox`）；现在检测到 `.gitmodules` 自动改用 `git clone --recursive --depth 1`，实测克隆成功（tombox 1616 个文件）。
+
+## v1.9.0：修复 legacy 包「有声音没画面」+ 按构建能力补 env
+
+**根因**（用户日志与包对照确认）：
+- legacy 包 `start-8gb.bat` 把 `set VICTORY_RESOLUTION=1920x1080` / `VICTORY_CARD_BUFFERS_MB` 写在 `victory.exe run` **之后**（且在 pause 后）→ 永远不生效
+- 标题按 3840×2160 出画，窗口 fit 到约 1848×1040 几乎盖满屏幕 → flip chain/DWM 合成失败 → **黑屏/白屏，但音频正常**
+
+**修复**：
+- 启动器 Build-Env 现在按构建能力自动选画面方案：
+  - 新构建（exe 含 `VICTORY_RENDER_SCALE`）→ `RENDER_SCALE` + `OWN_UPSCALER` + `COMPOSE`
+  - legacy 构建（不含）→ `VICTORY_RESOLUTION=<宽>x<高>` + `CARD_BUFFERS_MB=1024`，不再设无效的 RENDER_SCALE
+- 所有构建统一 `VICTORY_WINDOW_PERCENT=88`（避免窗口盖满屏幕触发 flip chain 黑屏）
+- 日志会打印「构建类型: 新构建/legacy」和实际 env，便于排查
+- 已修复 legacy 包 bat 顺序并重打包：`legacy-GTA6-VIctory-8GB-20261125.zip`、`legacy-GTA6-VIctory-12GBplus-20261125.zip`（原文件已留 .bak）
+- 新出 `20261126b` 分发包：`GTA6-VIctoryPerf-8GB-20261126b.zip`、`GTA6-VIctoryPerf-12GBplus-20261126b.zip`

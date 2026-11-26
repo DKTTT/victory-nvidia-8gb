@@ -33,3 +33,10 @@
 2. 双击 `GTA6启动器-GUI.bat`
 3. 选择构建（构建 1 = 最快）、主机模式（Series S）、渲染分辨率（540p 均衡）
 4. 先点「预热全部」，完成后再「启动游戏」
+## 启动器（tools/launcher，v1.9.0）
+
+解压启动器包或直接使用本目录：
+- 双击 `GTA6-Launcher.bat`
+- 功能：硬件检测 / 构建扫描 / 预热 / 启动 / 排行榜推荐 / 键盘映射 / 崩溃记录 / 异步编译
+- **v1.9.0 修复**：legacy 构建自动补 `VICTORY_RESOLUTION` 与 `VICTORY_WINDOW_PERCENT=88`（解决"有声音没画面"）；新构建用 `RENDER_SCALE`
+- 注意：本仓库不含任何 legacy 分发包，不存在旧包 bat 顺序问题

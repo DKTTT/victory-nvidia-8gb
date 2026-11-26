@@ -1,0 +1,12 @@
+﻿{
+  "GameDir": "E:\\GTA6.Xbox.v1.0.2.1-CYBERLEEK",
+  "BuildRoot": "E:\\gta6\\work",
+  "CacheRoot": "E:\\gta6",
+  "SaveRoot": "E:\\gta6\\work",
+  "Repo": "DKTTT/victory-nvidia-8gb",
+  "Branch": "tools-and-patches",
+  "Console": "auto",
+  "Height": "auto",
+  "Build": "auto",
+  "Preset": "auto"
+}
