@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.5
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.9.6
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -888,7 +888,20 @@ $tabRace.Controls.Add($lstRec)
 $btnRecPull = New-Btn '拉取选中推荐构建' 14 506 190 32 $Green
 $btnRecRepo = New-Btn '打开项目仓库' 214 506 160 32
 $tabRace.Controls.Add($btnRecPull); $tabRace.Controls.Add($btnRecRepo)
-$lblLocalBuilds = New-Label '本地构建在榜情况：等待更新…' 384 510 660 22 9 $Muted
+# 这一行经常比窗口宽（以前会被截断）：换成可横向滚动的只读框，一个字都不丢
+$lblLocalBuilds = New-Object System.Windows.Forms.TextBox
+$lblLocalBuilds.Location = New-Object System.Drawing.Point(384, 508)
+$lblLocalBuilds.Size = New-Object System.Drawing.Size(644, 38)
+$lblLocalBuilds.Multiline = $true
+$lblLocalBuilds.WordWrap = $false
+$lblLocalBuilds.ScrollBars = 'Horizontal'
+$lblLocalBuilds.ReadOnly = $true
+$lblLocalBuilds.TabStop = $false
+$lblLocalBuilds.BorderStyle = 'FixedSingle'
+$lblLocalBuilds.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28)
+$lblLocalBuilds.ForeColor = $Muted
+$lblLocalBuilds.Font = New-Object System.Drawing.Font('Consolas', 9)
+$lblLocalBuilds.Text = '本地构建在榜：等待更新…'
 $tabRace.Controls.Add($lblLocalBuilds)
 
 # ---------------- Tab5: 键盘映射 ----------------
@@ -3343,6 +3356,41 @@ $form.Add_Shown({
                 }
                 $lines += ("  MAX_BOTTOM={0}  PAGE_HEIGHT={1}  OVERFLOW={2}" -f $maxB, $pg.ClientSize.Height, ($maxB -gt $pg.ClientSize.Height))
             }
+            $lines += "raceTab=" + $tabRace.ClientSize.Width + "x" + $tabRace.ClientSize.Height
+            $lines += ("localBuilds=({0},{1}) {2}x{3} readonly={4} scrollbars={5}" -f $lblLocalBuilds.Left, $lblLocalBuilds.Top, $lblLocalBuilds.Width, $lblLocalBuilds.Height, $lblLocalBuilds.ReadOnly, $lblLocalBuilds.ScrollBars)
+            $lines += ("localBuilds fits tab: {0} (right={1} <= {2})" -f (($lblLocalBuilds.Left + $lblLocalBuilds.Width) -le $tabRace.ClientSize.Width), ($lblLocalBuilds.Left + $lblLocalBuilds.Width), $tabRace.ClientSize.Width)
+            $lines += ("localBuilds text len=" + $lblLocalBuilds.Text.Length)
+            # 用真实长度的长文本自检那一行：PrintWindow 直接抓窗口，不受别的窗口遮挡
+            try {
+                $lblLocalBuilds.Text = '本地构建在榜：cool_fox→CGBJ#11 | src→VIctory-7900XTX#27 | vf-latest→victory-fork#1 | VI-BR-PORT-main#23 | victory-unified#21 | itzfx#5 | Victory-RDNA#6 | amd#12 | victory#9 | 共 9 个本地构建在榜'
+                $form.Refresh()
+                if (-not ('PrintWin' -as [type])) {
+                    Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
+using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices;
+public class PrintWin {
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  public static void Shot(IntPtr h, int w, int ht, string path) {
+    using (var bmp = new Bitmap(w, ht)) {
+      using (var g = Graphics.FromImage(bmp)) {
+        IntPtr hdc = g.GetHdc();
+        PrintWindow(h, hdc, 2);
+        g.ReleaseHdc(hdc);
+      }
+      bmp.Save(path, ImageFormat.Png);
+    }
+  }
+}
+"@
+                }
+                # 切到排行榜页再抓，否则抓到的是第一页
+                $tabs.SelectedIndex = 3
+                $form.Refresh()
+                Start-Sleep -Milliseconds 300
+                $shot = $env:GTA6_LAUNCHER_LAYOUTTEST + '.png'
+                [PrintWin]::Shot($form.Handle, $form.Width, $form.Height, $shot)
+                $lines += ("shot=" + $shot + "  size=" + $form.Width + "x" + $form.Height)
+                $lines += ("localBuilds text len=" + $lblLocalBuilds.Text.Length)
+            } catch { $lines += ("shot ERR " + $_.Exception.Message) }
             Set-Content -Path $env:GTA6_LAUNCHER_LAYOUTTEST -Value ($lines -join "`r`n") -Encoding UTF8
         } catch { Set-Content -Path $env:GTA6_LAUNCHER_LAYOUTTEST -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
         $form.Close()
@@ -4055,5 +4103,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.9.5 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.6 by DKTTT'
 [void]$form.ShowDialog()
