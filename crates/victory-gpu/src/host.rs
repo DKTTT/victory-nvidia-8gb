@@ -3839,6 +3839,8 @@ pub(crate) mod awake;
 mod card_steps;
 pub(crate) mod indirects;
 mod font;
+
+mod font_cn;
 mod menu;
 mod panel;
 mod place;

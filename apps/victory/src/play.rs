@@ -102,6 +102,9 @@ pub(crate) struct Play {
     /// The Series S profile (1280x720 inside: faster, softer).
     #[arg(long)]
     series_s: bool,
+    /// The Series X profile (1440p inside: sharper, slower). Turns the Series S default off.
+    #[arg(long)]
+    series_x: bool,
     /// 1440: output and scene 2560x1440; 1080to1440: scene 1920x1080
     /// upscaled by the title; 4k: the stock 3840x2160 output.
     #[arg(long, default_value = "1440", value_parser = RESOLUTIONS)]
@@ -165,7 +168,7 @@ fn parse_menu(text: &str) -> Vec<(String, String)> {
 /// `streamline`: the folder with NVIDIA's files, if there is one.
 fn settings(o: &Play, menu: &[(String, String)], streamline: Option<&Path>) -> (BTreeMap<String, String>, bool) {
     let saved = |k: &str| menu.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
-    let series_s = saved("VICTORY_MENU_CONSOLE").map_or(o.series_s, |c| c == "series-s");
+    let series_s = saved("VICTORY_MENU_CONSOLE").map_or(!o.series_x, |c| c == "series-s");
     let res = saved("VICTORY_MENU_RES").filter(|r| RESOLUTIONS.contains(r)).unwrap_or(&o.res);
     let dlss = saved("VICTORY_MENU_DLSS").filter(|d| DLSS_MODES.contains(d)).unwrap_or(&o.dlss);
     // 0: off; 2 to 6: that many frames shown for each one rendered (1, from an older file: 2).
