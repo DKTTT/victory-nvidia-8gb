@@ -114,6 +114,7 @@ const ITEMS: &[Item] = &[
     // The layer's switches.
     Item { var: "VICTORY_DLSS_PRESET", label: "DLSS 模型", values: &[("", "默认"), ("k", "K"), ("j", "J"), ("m", "M"), ("l", "L")], live: false },
     Item { var: "VICTORY_AMBIENT", label: "光照估算", values: &[("0.8", "0.8"), ("1", "1"), ("0.5", "0.5"), ("", "关")], live: false },
+    Item { var: "VICTORY_AMBIENT_RT", label: "环境光(RT)", values: &[("", "关"), ("1,1.5,0.8", "开"), ("0.5,3,1", "强")], live: false },
     Item { var: "VICTORY_AMBIENT_SPECULAR", label: "反射估算", values: ON_UNSET, live: false },
     Item { var: "VICTORY_AMBIENT_AIR", label: "雾上限", values: &[("1.5", "1.5"), ("1", "1"), ("2", "2"), ("", "无")], live: false },
     Item { var: "VICTORY_BVH_BUILDER", label: "光线追踪(慢/坏)", values: UNSET_ON, live: false },
