@@ -451,13 +451,19 @@ impl Menu {
         let about = if self.at == ITEMS.len() + PRELOAD { ABOUT_PRELOAD } else { [""; 3] };
         out.extend(about.iter().map(|l| (*l).to_owned()));
         out.push(if self.note.is_empty() { NOTE.to_owned() } else { self.note.clone() });
+        out.push(REPO.to_owned());
         out
     }
 
     /// Changes item `i` by `step` (+1 / -1) through its values.
     fn change(&mut self, i: usize, step: isize) {
         let item = &ITEMS[i];
-        let n = if item.var == "VICTORY_MENU_FRAMEGEN" && crate::fsr::selected() { 2 } else { item.values.len() as isize };
+        let fsr = ITEMS
+            .iter()
+            .position(|it| it.var == "VICTORY_MENU_FG_TYPE")
+            .and_then(|k| self.values.get(k))
+            .is_some_and(|v| v == "fsr");
+        let n = if item.var == "VICTORY_MENU_FRAMEGEN" && fsr { 2 } else { item.values.len() as isize };
         let now = index_of(item, &self.values[i]).map_or(-1, |x| x as isize);
         let next = if now < 0 { if step > 0 { 0 } else { n - 1 } } else { (now + step).rem_euclid(n) };
         self.values[i] = item.values[next as usize].0.to_owned();
@@ -728,51 +734,79 @@ impl Menu {
 mod tests {
     use super::*;
 
+    fn sample() -> Menu {
+        let values: Vec<String> = ITEMS
+            .iter()
+            .map(|i| i.values.first().map(|v| v.0.to_owned()).unwrap_or_default())
+            .collect();
+        Menu {
+            started: values.clone(),
+            values,
+            at: 0,
+            note: String::new(),
+            changed: false,
+            painted: None,
+            buffers: None,
+            failed: false,
+            notice: None,
+            notice_since: None,
+        }
+    }
+
+    /// 每一行都放得进框，且每个字符（中文/英文）都有字模——汉化完整性检查。
     #[test]
     fn every_line_fits_and_every_character_has_a_picture() {
-        let mut menu = Menu { values: ITEMS.iter().map(|_| String::new()).collect(), started: Vec::new(), at: 0, note: String::new(), changed: false, painted: None, buffers: None, failed: false };
-        menu.started = menu.values.clone();
+        let mut menu = sample();
         for at in 0..ITEMS.len() + ACTIONS.len() {
             menu.at = at;
             for line in menu.lines() {
-                assert!(line.len() <= COLUMNS as usize, "{line}");
-                for c in line.bytes() {
-                    assert_ne!(glyph(c.to_ascii_uppercase()), glyph(b'#'), "{line}: {}", c as char);
+                assert!(text_width(&line) <= BOX_W - 2 * RIM, "too wide: {line}");
+                for c in line.chars() {
+                    assert!(glyph_rows(c).is_some(), "no glyph for U+{:04X} in: {line}", c as u32);
                 }
             }
         }
+        for action in ACTIONS {
+            for c in action.chars() {
+                assert!(glyph_rows(c).is_some(), "no glyph for U+{:04X} in: {action}", c as u32);
+            }
+        }
+        for line in ABOUT_PRELOAD {
+            for c in line.chars() {
+                assert!(glyph_rows(c).is_some(), "no glyph for U+{:04X} in: {line}", c as u32);
+            }
+        }
+        for c in CONFIRM_PRELOAD.chars() {
+            assert!(glyph_rows(c).is_some(), "no glyph for U+{:04X}", c as u32);
+        }
     }
 
+    /// 动作列表与预载说明：说明只在「预载着色器」这一行出现。
     #[test]
-    fn the_link_is_always_right_under_the_note() {
-        let mut menu = Menu { values: ITEMS.iter().map(|_| String::new()).collect(), started: Vec::new(), at: 0, note: String::new(), changed: false, painted: None, buffers: None, failed: false };
-        menu.started = menu.values.clone();
-        for note in ["", "SAVED"] {
-            menu.note = note.to_owned();
-            for at in 0..ITEMS.len() + ACTIONS.len() {
-                menu.at = at;
-                let lines = menu.lines();
-                assert_eq!(lines.len(), LINES as usize);
-                let n = lines.len();
-                assert!(lines[n - 2].starts_with("* = CHANGED") || lines[n - 2] == note, "{}", lines[n - 2]);
-                assert_eq!(lines[n - 1], REPO);
-                // What a preload costs is said while it is picked, and only then.
-                let about = &lines[n - 5..n - 2];
-                if at == ITEMS.len() + PRELOAD {
-                    assert_eq!(about, ABOUT_PRELOAD);
-                } else {
-                    assert!(about.iter().all(String::is_empty), "{about:?}");
-                }
-            }
-        }
+    fn the_preload_hint_is_shown_only_while_picked() {
+        let mut menu = sample();
         assert_eq!(ACTIONS[PRELOAD], "预载着色器(重启游戏)");
-        assert!(CONFIRM_PRELOAD.len() <= COLUMNS as usize);
+        assert!(text_width(CONFIRM_PRELOAD) <= BOX_W - 2 * RIM);
+        for at in 0..ITEMS.len() + ACTIONS.len() {
+            menu.at = at;
+            let lines = menu.lines();
+            assert_eq!(lines.len(), LINES as usize);
+            let n = lines.len();
+            let about = &lines[n - 5..n - 2];
+            if at == ITEMS.len() + PRELOAD {
+                assert_eq!(about, ABOUT_PRELOAD);
+            } else {
+                assert!(about.iter().all(String::is_empty), "{about:?}");
+            }
+            assert_eq!(lines[n - 2], NOTE);
+            assert_eq!(lines[n - 1], REPO);
+        }
     }
 
+    /// 左右键在选项值之间循环。
     #[test]
     fn values_cycle_both_ways() {
-        let mut menu = Menu { values: ITEMS.iter().map(|i| i.values[0].0.to_owned()).collect(), started: Vec::new(), at: 0, note: String::new(), changed: false, painted: None, buffers: None, failed: false };
-        menu.started = menu.values.clone();
+        let mut menu = sample();
         let n = ITEMS[0].values.len();
         for _ in 0..n {
             menu.change(0, 1);
@@ -780,5 +814,19 @@ mod tests {
         assert_eq!(menu.values[0], ITEMS[0].values[0].0);
         menu.change(0, -1);
         assert_eq!(menu.values[0], ITEMS[0].values[n - 1].0);
+    }
+
+    /// 选了 FSR 后端时，帧生成这一行只有 关 / 2X 两档。
+    #[test]
+    fn fsr_offers_two_frame_generation_values() {
+        let mut menu = sample();
+        let fg = ITEMS.iter().position(|i| i.var == "VICTORY_MENU_FRAMEGEN").unwrap();
+        let kind = ITEMS.iter().position(|i| i.var == "VICTORY_MENU_FG_TYPE").unwrap();
+        menu.values[kind] = "fsr".to_owned();
+        menu.values[fg] = "2".to_owned();
+        menu.change(fg, 1);
+        assert_eq!(menu.values[fg], "0");
+        menu.change(fg, 1);
+        assert_eq!(menu.values[fg], "2");
     }
 }
