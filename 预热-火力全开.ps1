@@ -10,6 +10,8 @@ param(
     [switch]$SkipIntoLibrary,
     [switch]$FullRebuild,      # 连之前做过的管线也重做（驱动/构建更新后用）
     [int]$WarmLimit = 0,       # >0：这一轮最多做这么多条（试跑用）
+    [switch]$Fast,             # 快速模式：只做加载期用到的管线（--used），不跑全量、不写管线库
+    [switch]$Used,             # 用 --used：只预热加载期真正画过的管线
     [switch]$Yes
 )
 
@@ -101,7 +103,7 @@ if ($running) {
 # ---------- 1. 环境 ----------
 $cores = [Environment]::ProcessorCount
 if ($Jobs -le 0) { $Jobs = $cores }
-if ($WarmJobs -le 0) { $WarmJobs = [Math]::Max(2, [int][Math]::Ceiling($cores * 0.75)) }
+if ($WarmJobs -le 0) { $WarmJobs = [Math]::Max(2, $cores) }
 $env:VICTORY_GAME_DIR = $GameDir
 if (-not $env:VICTORY_CACHE_DIR) {
     $env:VICTORY_CACHE_DIR = Join-Path $ScriptDir 'cache'
@@ -125,6 +127,17 @@ if (-not $SkipShaders) {
 }
 
 # ---------- 3. 管线预热：反复做到没有新管线 ----------
+if ($Fast) {
+    Phase '第 2 步 / 共 3 步：快速预热（只做加载期用到的管线）'
+    $r = Run $exe @('warm', '--used', '--jobs', "$WarmJobs") '快速预热加载期管线'
+    if ($r.code -ne 0) { Say '（快速预热返回非 0，可忽略）' }
+    Phase '完成（快速模式）'
+    Say '快速模式：没有预热全部管线，也没有写管线库。'
+    Say '先进游戏玩一次——游戏里用到的管线会被驱动缓存下来，下次启动就顺了；'
+    Say '想一次做到底就再跑一次不带 -Fast 的本脚本（支持断点续跑）。'
+    Say ('完整日志：' + $LogPath)
+    exit 0
+}
 Phase '第 2 步 / 共 3 步：预热全部管线（反复做到没有新管线）'
 $round = 0
 $stalled = 0
@@ -132,6 +145,7 @@ $lastTodo = -1
 while ($round -lt $MaxWarmRounds) {
     $round++
     $warmArgs = @('warm', '--jobs', "$WarmJobs")
+    if ($Used) { $warmArgs += '--used' }
     if ($WarmLimit -gt 0) { $warmArgs += @('--limit', "$WarmLimit") }
     if ($FullRebuild -and $round -eq 1) { $warmArgs += '--again' }
     Say ''
