@@ -129,13 +129,59 @@ fn parse(set: &str) -> Set {
 
 fn set() -> Set {
     static SET: OnceLock<Set> = OnceLock::new();
-    *SET.get_or_init(|| parse(&std::env::var("VICTORY_AMBIENT").unwrap_or_default()))
+    *SET.get_or_init(|| match parse(&std::env::var("VICTORY_AMBIENT").unwrap_or_default()) {
+        // With the band asked for and no share, the band's level.
+        Set::Off => rt_band().map_or(Set::Off, |b| Set::Estimate(b.level)),
+        set => set,
+    })
+}
+
+/// With ray tracing (`VICTORY_AMBIENT_RT=<least>,<most>[,<level>]`; unset:
+/// off, the title's own light whenever the builder runs): the diffuse light
+/// the title's resolve leaves is kept between `least` and `most` times the
+/// estimate (level: the share of the estimate when `VICTORY_AMBIENT` is not
+/// set, 0.8). The title's traced light flickers and goes black indoors while
+/// the structures its rays walk are partly wrong: its detail stays inside the
+/// band, its swings and black rooms do not.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Band {
+    least: f32,
+    most: f32,
+    level: f32,
+}
+
+pub(crate) fn rt_band() -> Option<Band> {
+    static SET: OnceLock<Option<Band>> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let band = parse_band(&std::env::var("VICTORY_AMBIENT_RT").ok()?)?;
+        tracing::info!(least = band.least, most = band.most, level = band.level, "the stand-in keeps the traced indirect light in a band (VICTORY_AMBIENT_RT)");
+        Some(band)
+    })
+}
+
+fn parse_band(set: &str) -> Option<Band> {
+    let mut parts = set.split(',').map(|p| p.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0));
+    let least = parts.next().flatten()?;
+    let most = parts.next().flatten().unwrap_or(4.0).max(least).max(1e-3);
+    let level = parts.next().flatten().filter(|v| *v > 0.0).unwrap_or(0.8);
+    Some(Band { least, most, level })
+}
+
+/// The title's leftover light is kept between these multiples of the
+/// estimate: with rays, the band's; without, at least the estimate and at
+/// most four times it.
+fn bounds() -> (f32, f32) {
+    match rt_band() {
+        Some(b) if crate::pipeline::builder_runs() => (b.least, b.most),
+        _ => (1.0, 4.0),
+    }
 }
 
 /// Whether a stand-in is on (for the diffuse light or for reflections):
-/// set, and the title's rays find nothing.
+/// set, and the title's rays find nothing (or the band is asked for with them).
 pub(crate) fn on() -> bool {
-    (set() != Set::Off || specular().is_some()) && !crate::pipeline::builder_runs()
+    let diffuse = set() != Set::Off && (rt_band().is_some() || !crate::pipeline::builder_runs());
+    diffuse || (specular().is_some() && !crate::pipeline::builder_runs())
 }
 
 /// `VICTORY_AMBIENT_SPECULAR=<share>[,<sky>]`: reflections whose rays found
@@ -221,7 +267,7 @@ fn shade() -> [f32; 2] {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=13, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
+#define RS "RootConstants(num32BitConstants=14, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
 #define CX 64
 #define CY 36
 #define CELLS (CX * CY)
@@ -231,7 +277,7 @@ cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
     float follow; float most; float air; float once;
-    uint chroma_scrub;
+    uint chroma_scrub; float least;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -739,14 +785,16 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     list.keep(&pass.points);
     let [strength, radius] = shade();
     let floats = [level, constant, strength, radius, 0.1, 0.45];
-    let mut words = [0u32; 13];
+    let mut words = [0u32; 14];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
     words[6] = views.depth_size[0];
     words[7] = views.depth_size[1];
     words[8] = 0.04f32.to_bits();
-    words[9] = 4.0f32.to_bits();
+    let (least, most) = bounds();
+    words[9] = most.to_bits();
+    words[13] = least.to_bits();
     words[10] = air().to_bits();
     words[11] = if once() { 1.0f32 } else { 0.0 }.to_bits();
     words[12] = u32::from(chroma_scrub());
@@ -757,7 +805,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     unsafe {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
-        l.SetComputeRoot32BitConstants(0, 13, words.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, 14, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(1, views.depth);
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
@@ -805,6 +853,17 @@ mod tests {
         assert_eq!(parse("0.8"), Set::Estimate(0.8));
         assert_eq!(parse("constant:0.3"), Set::Constant(0.3));
         assert_eq!(parse("constant:nan"), Set::Off);
+
+        #[test]
+        fn the_band_with_rays() {
+            assert_eq!(parse_band("0.5,1.5"), Some(Band { least: 0.5, most: 1.5, level: 0.8 }));
+            assert_eq!(parse_band("1,1,0.6"), Some(Band { least: 1.0, most: 1.0, level: 0.6 }));
+            // The top is never under the floor; a missing top is four times.
+            assert_eq!(parse_band("2,1"), Some(Band { least: 2.0, most: 2.0, level: 0.8 }));
+            assert_eq!(parse_band("0.7"), Some(Band { least: 0.7, most: 4.0, level: 0.8 }));
+            assert_eq!(parse_band(""), None);
+            assert_eq!(parse_band("x,1"), None);
+        }
     }
 
     #[test]
@@ -1195,8 +1254,8 @@ mod tests {
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     )]);
 
-                    // RS: RootConstants(13, b0), SRV(t0)=depth, UAV(u0)=light, UAV(u1)=cells, UAV(u2)=points.
-                    let mut words = [0u32; 13];
+                    // RS: RootConstants(14, b0), SRV(t0)=depth, UAV(u0)=light, UAV(u1)=cells, UAV(u2)=points.
+                    let mut words = [0u32; 14];
                     words[0] = 1.0f32.to_bits(); // level
                     words[1] = 0.0f32.to_bits(); // constant
                     words[2] = 0.0f32.to_bits(); // strength
@@ -1210,11 +1269,12 @@ mod tests {
                     words[10] = 0.0f32.to_bits(); // air
                     words[11] = 0.0f32.to_bits(); // once
                     words[12] = u32::from(scrub_on); // chroma_scrub
+                      words[13] = 1.0f32.to_bits(); // least (no band: the estimate)
 
                     list.SetDescriptorHeaps(&[Some(heap.clone())]);
                     list.SetComputeRootSignature(&pass.root);
                     list.SetPipelineState(&pass.raise);
-                    list.SetComputeRoot32BitConstants(0, 13, words.as_ptr().cast(), 0);
+                    list.SetComputeRoot32BitConstants(0, 14, words.as_ptr().cast(), 0);
                     list.SetComputeRootDescriptorTable(1, gpu0);
                     list.SetComputeRootDescriptorTable(2, gpu1);
                     list.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
