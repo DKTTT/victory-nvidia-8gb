@@ -39,7 +39,7 @@ The layer translates the Xbox Series build of GTA6 (v1.0.2.1) to Windows.
 | `启动-不插帧(最稳).bat` | Frame generation off (for troubleshooting) |
 | `启动-8G平衡.bat` | FSR 2x + one mip level dropped + 256 MB card window |
 | `预热.bat` | Translate shaders ahead of time (no game start) |
-| `预热-火力全开.bat` | Full-power preload: every shader (all cores), every pipeline, baked into the pipeline library; long but resumable |
+| `预热-火力全开.bat` | Full-power preload: every shader (all cores), every pipeline, baked into the pipeline library. Scales to your CPU core count and asks for confirmation (time + stutter warning) first; long but resumable. Add `-Fast` to only do load-time pipelines (minutes) |
 | `重置F1设置(卡崩时用).bat` | Clears `%LOCALAPPDATA%\victory\victory-settings.txt` (backed up as `.bak`) |
 
 ## 4. The F1 menu

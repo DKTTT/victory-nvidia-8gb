@@ -10,6 +10,9 @@ param(
     [switch]$SkipIntoLibrary,
     [switch]$FullRebuild,      # 连之前做过的管线也重做（驱动/构建更新后用）
     [int]$WarmLimit = 0,       # >0：这一轮最多做这么多条（试跑用）
+    [switch]$Fast,             # 快速模式：只做加载期用到的管线（--used），不跑全量、不写管线库
+    [switch]$NoGui,            # 不弹确认窗（自动化/远程用）
+    [switch]$Used,             # 用 --used：只预热加载期真正画过的管线
     [switch]$Yes
 )
 
@@ -100,8 +103,28 @@ if ($running) {
 
 # ---------- 1. 环境 ----------
 $cores = [Environment]::ProcessorCount
-if ($Jobs -le 0) { $Jobs = $cores }
-if ($WarmJobs -le 0) { $WarmJobs = [Math]::Max(2, [int][Math]::Ceiling($cores * 0.75)) }
+# 按核心数分档：核心少就少开进程，别把桌面拖死；核心多就吃满
+if ($cores -le 4) {
+    $tier = '低配'
+    if ($Jobs -le 0) { $Jobs = $cores }
+    if ($WarmJobs -le 0) { $WarmJobs = [Math]::Max(2, [int][Math]::Floor($cores / 2)) }
+    $estimate = '大约 6–10 小时'
+} elseif ($cores -le 8) {
+    $tier = '中配'
+    if ($Jobs -le 0) { $Jobs = $cores }
+    if ($WarmJobs -le 0) { $WarmJobs = [Math]::Max(2, [int][Math]::Floor($cores / 2)) }
+    $estimate = '大约 4–6 小时'
+} elseif ($cores -le 16) {
+    $tier = '高配'
+    if ($Jobs -le 0) { $Jobs = $cores }
+    if ($WarmJobs -le 0) { $WarmJobs = [Math]::Max(2, [int][Math]::Round($cores * 0.75)) }
+    $estimate = '大约 2.5–4 小时'
+} else {
+    $tier = '极高配'
+    if ($Jobs -le 0) { $Jobs = $cores }
+    if ($WarmJobs -le 0) { $WarmJobs = [Math]::Max(2, $cores) }
+    $estimate = '大约 2–3 小时'
+}
 $env:VICTORY_GAME_DIR = $GameDir
 if (-not $env:VICTORY_CACHE_DIR) {
     $env:VICTORY_CACHE_DIR = Join-Path $ScriptDir 'cache'
@@ -111,7 +134,55 @@ if (-not $env:VICTORY_DATA_DIR) {
 }
 New-Item -ItemType Directory -Force -Path $env:VICTORY_CACHE_DIR | Out-Null
 $env:VICTORY_PROCESS_PRIORITY = 'high'
-Say ('逻辑核心：{0}；着色器编译线程：{1}；管线预热进程：{2}' -f $cores, $Jobs, $WarmJobs)
+Say ('逻辑核心：{0}（{1}）；着色器编译线程：{2}；管线预热进程：{3}' -f $cores, $tier, $Jobs, $WarmJobs)
+
+# 全量预热前确认（-Fast 只做几分钟，不拦）
+if (-not $Fast -and -not $Yes) {
+    $warning = @()
+    $warning += '【GTA6 火力全开预热】'
+    $warning += ''
+    $warning += ('你的 CPU：{0} 核（{1}）' -f $cores, $tier)
+    $warning += ('将使用：{0} 线程编译着色器 + {1} 个进程预热管线' -f $Jobs, $WarmJobs)
+    $warning += ('预计耗时：{0}（第一次；之后/更新驱动后要重做）' -f $estimate)
+    $warning += ''
+    $warning += '⚠ 可能卡顿：预热会吃满 CPU，期间玩别的游戏、看视频、'
+    $warning += '   开网页都可能明显卡顿、掉帧；显卡也会高负载。'
+    $warning += ''
+    $warning += '建议：预热时不要进游戏、不要同时做别的事；'
+    $warning += '     可以 Ctrl+C 中止，进度保留，下次接着做。'
+    $warning += '     时间紧就先跑 -Fast 快速模式（只做加载期，几分钟）。'
+    $warning += ''
+    $warning += '确认要开始全量预热吗？'
+    Write-Host ''
+    foreach ($line in $warning) { Write-Host ('  ' + $line) }
+    Write-Host ''
+    Add-Content -LiteralPath $LogPath -Value ($warning -join "`r`n") -Encoding UTF8
+
+    $go = $false
+    $gui = (-not $NoGui) -and (-not $env:VICTORY_NO_GUI) -and [Environment]::UserInteractive
+    if ($gui) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms | Out-Null
+            $text = ($warning -join "`n")
+            $answer = [System.Windows.Forms.MessageBox]::Show(
+                $text, 'GTA6 预热（火力全开）— 确认',
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning,
+                [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+            $go = ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
+        } catch {
+            $go = $null
+        }
+    }
+    if ($null -eq $go -or (-not $gui)) {
+        $answer = Read-Host '继续请按 Y，回车或 N 取消'
+        $go = ($answer -match '^[Yy]')
+    }
+    if (-not $go) {
+        Say '已取消，没有做任何预热。'
+        exit 0
+    }
+}
 Say ('缓存目录：' + $env:VICTORY_CACHE_DIR)
 Say ('日志：' + $LogPath)
 
@@ -125,6 +196,17 @@ if (-not $SkipShaders) {
 }
 
 # ---------- 3. 管线预热：反复做到没有新管线 ----------
+if ($Fast) {
+    Phase '第 2 步 / 共 3 步：快速预热（只做加载期用到的管线）'
+    $r = Run $exe @('warm', '--used', '--jobs', "$WarmJobs") '快速预热加载期管线'
+    if ($r.code -ne 0) { Say '（快速预热返回非 0，可忽略）' }
+    Phase '完成（快速模式）'
+    Say '快速模式：没有预热全部管线，也没有写管线库。'
+    Say '先进游戏玩一次——游戏里用到的管线会被驱动缓存下来，下次启动就顺了；'
+    Say '想一次做到底就再跑一次不带 -Fast 的本脚本（支持断点续跑）。'
+    Say ('完整日志：' + $LogPath)
+    exit 0
+}
 Phase '第 2 步 / 共 3 步：预热全部管线（反复做到没有新管线）'
 $round = 0
 $stalled = 0
@@ -132,6 +214,7 @@ $lastTodo = -1
 while ($round -lt $MaxWarmRounds) {
     $round++
     $warmArgs = @('warm', '--jobs', "$WarmJobs")
+    if ($Used) { $warmArgs += '--used' }
     if ($WarmLimit -gt 0) { $warmArgs += @('--limit', "$WarmLimit") }
     if ($FullRebuild -and $round -eq 1) { $warmArgs += '--again' }
     Say ''
