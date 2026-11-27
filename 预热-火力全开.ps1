@@ -298,6 +298,18 @@ if (-not $SkipShaders) {
     Say '（跳过着色器编译）'
 }
 
+# 上一次被 Ctrl+C 打断时，正在做的管线会被误记进 warm-bad.txt（exit code 0xc000013a）。
+# 先剔掉这些误记，否则那几条永远不会再预热。
+$badFile = Join-Path (Join-Path $env:VICTORY_CACHE_DIR 'pipelines') 'warm-bad.txt'
+if (Test-Path -LiteralPath $badFile) {
+    $badLines = Get-Content -LiteralPath $badFile -Encoding UTF8 -ErrorAction SilentlyContinue
+    $kept = @($badLines | Where-Object { $_ -notmatch '0xc000013a' })
+    if ($kept.Count -ne $badLines.Count) {
+        Set-Content -LiteralPath $badFile -Value $kept -Encoding UTF8
+        Say ('已清理上次 Ctrl+C 误记的管线：{0} 条（会重新预热）' -f ($badLines.Count - $kept.Count))
+    }
+}
+
 # ---------- 3. 管线预热：反复做到没有新管线 ----------
 if ($Fast) {
     Phase '第 2 步 / 共 3 步：快速预热（只做加载期用到的管线）'
