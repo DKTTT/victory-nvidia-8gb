@@ -45,9 +45,9 @@ const LINES: u32 = ROWS as u32 + 9;
 /// The action that preloads shaders, and what is said of it while it is picked.
 const PRELOAD: usize = 2;
 const ABOUT_PRELOAD: [&str; 3] = [
-    "MAKES EVERY SHADER AHEAD, THEN STARTS THE GAME AGAIN.",
-    "TAKES A WHILE: MAYBE A LONG TIME, DEPENDING ON HARDWARE.",
-    "A LATER UPDATE OF THIS BUILD MAY NEED A NEW PRELOAD.",
+    "预载会先编译全部着色器，再重启游戏。",
+    "需要一些时间，长短看硬件（主要看 CPU）。",
+    "以后更新构建或显卡驱动，可能需要重新预载。",
 ];
 /// The note after the first Enter on it: the second one does it.
 const CONFIRM_PRELOAD: &str = "再按一次回车：保存、关闭游戏并预载着色器";
@@ -69,7 +69,7 @@ struct Item {
 /// 中文菜单的静态文案。
 const TITLE: &str = "设置";
 const TITLE_RIGHT: &str = "F1 或 ESC 关闭";
-const HELP: &str = "上下选择  左右修改  Enter 执行";
+const HELP: &str = "上下选择  左右修改  回车执行";
 const NOTE: &str = "* = 已修改：下次启动生效（即时=立即生效）";
 const MARKS: [&str; 2] = [" 即时", " *"];
 
@@ -219,7 +219,7 @@ fn index_of(item: &Item, value: &str) -> Option<usize> {
 fn shown_value(item: &Item, value: &str) -> String {
     match index_of(item, value) {
         Some(i) => item.values[i].1.to_owned(),
-        None if value.is_empty() => "NOT SET".to_owned(),
+        None if value.is_empty() => "未设置".to_owned(),
         None => value.to_ascii_uppercase(),
     }
 }
@@ -373,6 +373,7 @@ impl Buffers {
     }
 }
 
+
 /// The menu of a presenter.
 pub(super) struct Menu {
     /// The values chosen, by item (as at start until changed).
@@ -387,6 +388,10 @@ pub(super) struct Menu {
     painted: Option<String>,
     buffers: Option<Buffers>,
     failed: bool,
+    /// The start's notice (the GPU, which frame generation runs and why not),
+    /// shown at the top for its first seconds.
+    notice: Option<Vec<String>>,
+    notice_since: Option<std::time::Instant>,
 }
 
 impl Menu {
@@ -398,7 +403,22 @@ impl Menu {
             crate::SETTINGS_MENU_OPEN.store(true, Ordering::Relaxed);
         }
         let values: Vec<String> = ITEMS.iter().map(|i| get(i.var)).collect();
-        Menu { started: values.clone(), values, at: 0, note: String::new(), changed: true, painted: None, buffers: None, failed: false }
+        let notice = {
+            let lines = crate::streamline::notice();
+            (!lines.is_empty()).then_some(lines)
+        };
+        Menu {
+            started: values.clone(),
+            values,
+            at: 0,
+            note: String::new(),
+            changed: true,
+            painted: None,
+            buffers: None,
+            failed: false,
+            notice,
+            notice_since: None,
+        }
     }
 
     fn open() -> bool {
@@ -602,19 +622,40 @@ impl Menu {
         if self.failed {
             return;
         }
-        // Closed: the frame-rate line in the top left corner, if it is wanted and there is a rate.
+        // Closed: the start's notice at the top, else the frame-rate line in the top left
+        // corner, if it is wanted and there is a rate.
         let open = Self::open();
-        let line = if open { None } else { fps_line() };
-        if !open && line.is_none() {
+        const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+        if !open && self.notice.is_some() {
+            let over = match self.notice_since {
+                Some(since) => since.elapsed() > NOTICE_FOR,
+                None => {
+                    self.notice_since = Some(std::time::Instant::now());
+                    false
+                }
+            };
+            if over {
+                self.notice = None;
+                self.notice_since = None;
+                self.changed = true;
+            }
+        }
+        let notice = if open { None } else { self.notice.clone() };
+        let line = if open || notice.is_some() { None } else { fps_line() };
+        if !open && notice.is_none() && line.is_none() {
             return;
         }
         // Our own copies are not part of a recorded frame (the recorder is in diagnostics builds).
         #[cfg(feature = "diagnostics")]
         let _ours = crate::replay::record::unrecorded();
         let scale = (height / 540).max(1);
-        let (base_w, base_h) = match &line {
-            Some(l) => (text_width(l) + 2 * RIM, LINE_H + 2 * RIM),
-            None => (BOX_W + 2 * RIM, LINES * LINE_H + 2 * RIM),
+        let (base_w, base_h) = if let Some(lines) = &notice {
+            let width = lines.iter().map(|l| text_width(l)).max().unwrap_or(0) + 2 * RIM;
+            (width, lines.len() as u32 * LINE_H + 2 * RIM)
+        } else if let Some(l) = &line {
+            (text_width(l) + 2 * RIM, LINE_H + 2 * RIM)
+        } else {
+            (BOX_W + 2 * RIM, LINES * LINE_H + 2 * RIM)
         };
         if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale, b.base_w, b.base_h) != (format, scale, base_w, base_h)) {
             std::mem::forget(self.buffers.take());
@@ -626,7 +667,17 @@ impl Menu {
             self.painted = line.clone();
             self.changed = true;
         }
-        let lines = if self.changed { Some(line.as_ref().map_or_else(|| self.lines(), |l| vec![l.clone()])) } else { None };
+        let lines = if self.changed {
+            Some(if let Some(n) = &notice {
+                n.clone()
+            } else if let Some(l) = &line {
+                vec![l.clone()]
+            } else {
+                self.lines()
+            })
+        } else {
+            None
+        };
         let Some(buffers) = &mut self.buffers else { return };
         if let Some(lines) = lines {
             self.changed = false;
@@ -635,7 +686,13 @@ impl Menu {
         // The whole box in the middle, or of it the first line's part in the corner.
         let (w, h) = (base_w * scale, base_h * scale);
         let (w, h) = (w.min(width), h.min(height));
-        let (x, y) = if line.is_some() { (0, 0) } else { ((width - w) / 2, (height - h) / 2) };
+        let (x, y) = if notice.is_some() {
+            ((width - w) / 2, 24 * scale)
+        } else if line.is_some() {
+            (0, 0)
+        } else {
+            ((width - w) / 2, (height - h) / 2)
+        };
         let list = &list.list;
         // SAFETY: an open list and live resources; the box lies within both.
         unsafe {
@@ -708,7 +765,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(ACTIONS[PRELOAD], "PRELOAD SHADERS (RESTARTS THE GAME)");
+        assert_eq!(ACTIONS[PRELOAD], "预载着色器(重启游戏)");
         assert!(CONFIRM_PRELOAD.len() <= COLUMNS as usize);
     }
 

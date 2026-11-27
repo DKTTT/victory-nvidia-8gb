@@ -2300,30 +2300,24 @@ pub fn notice() -> Vec<String> {
     let Some(f) = FACTS.get() else {
         return Vec::new();
     };
-    let mut lines = vec![format!("GPU {}", f.adapter)];
-    lines.push(format!(
-        "DLSS UPSCALING {}",
-        if f.dlss { "ON" } else { "OFF" }
-    ));
+    let mut lines = vec![format!("显卡 {}", f.adapter)];
+    lines.push(format!("DLSS 超分 {}", if f.dlss { "开" } else { "关" }));
     let frame_gen = if f.fsr_loaded {
-        "FRAME GEN FSR 3 2X".to_owned()
+        "帧生成 FSR 3 (2X) 开".to_owned()
     } else if f.framegen_ready {
-        "FRAME GEN DLSS READY".to_owned()
+        "帧生成 DLSS 就绪".to_owned()
     } else if f.fsr_asked && !f.fsr_loaded {
-        "FRAME GEN OFF: AMDS FSR FILES MISSING".to_owned()
+        "帧生成关：缺少 AMD FSR 运行库".to_owned()
     } else if f.framegen_asked && f.files_missing {
-        "FRAME GEN OFF: NVIDIA FILES MISSING".to_owned()
+        "帧生成关：缺少 NVIDIA 文件".to_owned()
     } else if f.framegen_asked && f.addon {
-        "FRAME GEN OFF: DLSSG ADD-ON FAILED".to_owned()
+        "帧生成关：DLSS-G 插件加载失败".to_owned()
     } else if f.framegen_asked {
-        "FRAME GEN OFF: NEEDS RTX 40 OR ADD-ON".to_owned()
+        "帧生成关：需要 RTX 40 或插件".to_owned()
     } else {
-        "FRAME GEN OFF (F1 MENU CAN ENABLE IT)".to_owned()
+        "帧生成关（F1 菜单可开）".to_owned()
     };
-    lines.push(frame_gen.replace("AMDS", "AMD'S"));
-    if f.dlss_off && f.fsr_loaded {
-        lines.push("FSR NEEDS DLSS UPSCALING ON THIS PROFILE".to_owned());
-    }
+    lines.push(frame_gen);
     lines
         .into_iter()
         .map(|l| l.chars().take(52).collect())

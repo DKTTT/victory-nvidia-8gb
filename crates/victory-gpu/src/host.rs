@@ -9372,9 +9372,6 @@ struct Presenter {
     panel: panel::Panel,
     /// The F1 settings menu.
     menu: menu::Menu,
-    /// The start's notice: the GPU, which frame generation runs and, if not,
-    /// why (shown for the first seconds of a run).
-    notice: panel::Notice,
 }
 
 /// The frame rate, shown in the window's caption every second and logged
@@ -10113,7 +10110,6 @@ impl Host {
             };
             p.panel.draw(self, copy, &back, (width, height), format);
             p.menu.draw(self, copy, &back, (width, height), format);
-            p.notice.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -10280,7 +10276,6 @@ impl Host {
                 composer: None,
                 panel: panel::Panel::new(),
                 menu: menu::Menu::new(),
-                notice: panel::Notice::new(),
             })
         }
     }
