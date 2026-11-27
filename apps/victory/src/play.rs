@@ -365,14 +365,45 @@ pub(crate) fn prepare(o: &Play) -> Result<Ready> {
     }
     let streamline = streamline_dir(&here);
     let (mut s, series_s) = settings(o, &menu, streamline.as_deref());
-    // Where the menu saves, and how it starts the title again (`--set` is not carried over).
+    // LOCAL (CN): frame generation needs the dlssg_for_sm86 add-on folder in
+    // VICTORY_DLSSG_SM86_DIR; packages ship it as `dlssg-sm86/` next to victory.exe,
+    // so find it there when the launch did not name it.
+    let beside_addon = [here.join("dlssg-sm86"), here.join("..").join("dlssg-sm86")]
+        .into_iter()
+        .find(|d| d.join("version.dll").is_file());
+    if s.get("VICTORY_FRAMEGEN").map(String::as_str) == Some("1")
+        && !s.contains_key("VICTORY_DLSSG_SM86_DIR")
+        && let Some(dir) = &beside_addon
+    {
+        s.insert("VICTORY_DLSSG_SM86_DIR".to_owned(), dir.to_string_lossy().into_owned());
+    }
+    // Where the menu saves, and how it starts the title again.
     let quoted = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+    // LOCAL (CN): the frame-generation add-on folder must survive "save and restart":
+    // `play` puts it in VICTORY_DLSSG_SM86_DIR for the title, and without it the restarted
+    // run asks for frame generation and Streamline declines ("not available"), so the menu
+    // shows it off again. Carry it over as `--set`, and find it beside the executable when
+    // the launcher did not name it (packages ship `dlssg-sm86/` next to victory.exe).
+    let addon = s
+        .get("VICTORY_DLSSG_SM86_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|d| d.join("version.dll").is_file())
+        .or_else(|| {
+            [here.join("dlssg-sm86"), here.join("..").join("dlssg-sm86")]
+                .into_iter()
+                .find(|d| d.join("version.dll").is_file())
+        });
+    let mut restart = format!("play {}", quoted(&exe));
+    if o.no_framegen_ready {
+        restart.push_str(" --no-framegen-ready");
+    }
+    if let Some(dir) = &addon {
+        let dir = dir.to_string_lossy().replace('\'', "''");
+        restart.push_str(&format!(" --set \"VICTORY_DLSSG_SM86_DIR={dir}\""));
+    }
     s.insert("VICTORY_MENU_FILE".to_owned(), menu_file.to_string_lossy().into_owned());
     s.insert("VICTORY_MENU_PLAY".to_owned(), program.to_string_lossy().into_owned());
-    s.insert(
-        "VICTORY_MENU_ARGS".to_owned(),
-        format!("play {}{}", quoted(&exe), if o.no_framegen_ready { " --no-framegen-ready" } else { "" }),
-    );
+    s.insert("VICTORY_MENU_ARGS".to_owned(), restart);
     let log = log_file(&home.join("logs"))?;
     let console = if series_s { "series-s" } else { "series-x" };
     let line: Vec<String> = s.iter().map(|(k, v)| format!("{k}={v}")).collect();
