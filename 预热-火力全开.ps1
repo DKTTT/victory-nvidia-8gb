@@ -12,7 +12,8 @@ param(
     [int]$WarmLimit = 0,       # >0：这一轮最多做这么多条（试跑用）
     [switch]$Fast,             # 快速模式：只做加载期用到的管线（--used），不跑全量、不写管线库
     [switch]$NoGui,            # 不弹确认窗（自动化/远程用）
-    [switch]$Turbo,            # 暴力模式：进程数加倍 + 高优先级 + 更大批量
+    [switch]$Turbo,            # 暴力模式：进程数加倍 + 较高优先级（安全，不会导致蓝屏/系统中断）
+    [switch]$Extreme,          # 更暴力：High 优先级 + 批量160（仍不用 Realtime，仍会随时可停）
     [switch]$Used,             # 用 --used：只预热加载期真正画过的管线
     [switch]$Yes
 )
@@ -146,12 +147,35 @@ if (-not $env:VICTORY_DATA_DIR) {
 New-Item -ItemType Directory -Force -Path $env:VICTORY_CACHE_DIR | Out-Null
 $env:VICTORY_PROCESS_PRIORITY = 'high'
 
-# 暴力模式：进程数加倍、子进程升到高优先级、每进程做更多管线（少开关进程）
-if ($Turbo) {
-    $WarmJobs = [Math]::Max(4, $cores * 2)
-    $env:VICTORY_WARM_PRIORITY = 'high'
-    $env:VICTORY_WARM_BATCH = '120'
+# 暴力模式：进程数加倍、子进程提优先级、每进程做更多管线（少开关进程）。
+# 安全上限：优先级最高只到 High（绝不用 Realtime），进程数封顶 48，批量封顶 160；
+# 内存紧张时看护进程会自动把预热进程降到 BelowNormal，防止页面风暴拖死系统。
+if ($Turbo -or $Extreme) {
+    $WarmJobs = [Math]::Min([Math]::Max(4, $cores * 2), 48)
+    if ($Extreme) {
+        $env:VICTORY_WARM_PRIORITY = 'high'
+        $env:VICTORY_WARM_BATCH = '160'
+        $watchClass = 'High'
+        $watchText = 'High'
+    } else {
+        $env:VICTORY_WARM_PRIORITY = 'above'
+        $env:VICTORY_WARM_BATCH = '80'
+        $watchClass = 'AboveNormal'
+        $watchText = 'AboveNormal（安全档）'
+    }
+    # 内存保险：每个预热进程预留 1 GB，剩余内存不够就自动少开，绝不让系统进入页面风暴
+    $freeGB = 0
+    try { $freeGB = (Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue).FreePhysicalMemory / 1MB } catch {}
+    if ($freeGB -gt 0) {
+        $ramCap = [Math]::Max(2, [int][Math]::Floor($freeGB - 3))
+        if ($WarmJobs -gt $ramCap) {
+            Say ('内存只有 {0:N1} GB 空闲，预热进程数从 {1} 降到 {2}（安全起见）' -f $freeGB, $WarmJobs, $ramCap)
+            $WarmJobs = [Math]::Max(2, $ramCap)
+        }
+    }
     if (-not $env:VICTORY_LOG) { $env:VICTORY_LOG = 'warn' }
+} else {
+    $watchClass = $null
 }
 Say ('逻辑核心：{0}（{1}）；着色器编译线程：{2}；管线预热进程：{3}' -f $cores, $tier, $Jobs, $WarmJobs)
 
@@ -170,6 +194,9 @@ if (-not $Fast -and -not $Yes) {
     $warning += '建议：预热时不要进游戏、不要同时做别的事；'
     $warning += '     可以 Ctrl+C 中止，进度保留，下次接着做。'
     $warning += '     时间紧就先跑 -Fast 快速模式（只做加载期，几分钟）。'
+    $warning += ''
+    $warning += '安全说明：预热最多只会让系统卡顿；进程优先级最高只到 High'
+    $warning += '（绝不用 Realtime），内存不足时会自动降速，不会导致蓝屏或系统中断。'
     $warning += ''
     $warning += '确认要开始全量预热吗？'
     Write-Host ''
@@ -203,13 +230,25 @@ if (-not $Fast -and -not $Yes) {
     }
 }
 Say ('缓存目录：' + $env:VICTORY_CACHE_DIR)
-if ($Turbo) { Say ('暴力模式：{0} 个预热进程、高优先级、批量 120（桌面会明显变卡）' -f $WarmJobs) }
+if ($Turbo -or $Extreme) {
+    Say ('暴力模式：{0} 个预热进程、优先级 {1}、批量 {2}（桌面会卡，但不会蓝屏/系统中断）' -f $WarmJobs, $watchText, $env:VICTORY_WARM_BATCH)
+}
 
 # 把预热子进程的优先级提上来：新版 exe 自己会照 VICTORY_WARM_PRIORITY 执行，
 # 旧版（v5）子进程生来是 Idle，这里每 2 秒扫一次帮它们升到 High。
 $watcher = $null
-if ($Turbo) {
-    $cmd = "while (`$true) { Get-CimInstance Win32_Process -Filter \`"Name='victory.exe'\`" -EA SilentlyContinue | Where-Object { `$_.CommandLine -match '--these' } | ForEach-Object { try { (Get-Process -Id `$_.ProcessId -EA SilentlyContinue).PriorityClass = 'High' } catch {} }; Start-Sleep -Seconds 2 }"
+if ($watchClass) {
+    # 每 2 秒：把 warm 子进程提到 $watchClass；可用内存 < 1.5 GB 时降到 BelowNormal（防卡死/页面风暴）
+    $cmd = @"
+while (`$true) {
+    `$free = (Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue).FreePhysicalMemory / 1024
+    `$want = if (`$free -lt 1536) { 'BelowNormal' } else { '$watchClass' }
+    Get-CimInstance Win32_Process -Filter "Name='victory.exe'" -EA SilentlyContinue |
+        Where-Object { `$_.CommandLine -match '--these' } |
+        ForEach-Object { try { (Get-Process -Id `$_.ProcessId -EA SilentlyContinue).PriorityClass = `$want } catch {} }
+    Start-Sleep -Seconds 2
+}
+"@
     $watcher = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $cmd) -PassThru -WindowStyle Hidden
 }
 Say ('日志：' + $LogPath)
