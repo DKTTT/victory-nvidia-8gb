@@ -37,6 +37,58 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## [v1.10.6] - 2026-11-27
+
+### 新增：下载源可选「GTA HUB 镜像」（git.gtahub.st）
+
+「② 构建与下载」加了 **下载源** 下拉框：
+
+| 源 | 用到的地址 |
+|---|---|
+| `GitHub` | `api.github.com` / `codeload.github.com` / `github.com` |
+| `GTA HUB 镜像` | `git.gtahub.st`（Forgejo 17.0.2，把 GitHub 项目镜像成 `github/<Owner>--<Repo>`） |
+
+镜像源下自动换算：`Owner/Repo` → `github/Owner--Repo`，并改用 Forgejo 的接口：
+
+- 源码 ZIP：`https://git.gtahub.st/github/Owner--Repo/archive/<分支>.zip`
+- 最新提交：`/api/v1/repos/github/Owner--Repo/commits?sha=<分支>&limit=1`
+- 默认分支 / `.gitmodules`：`/api/v1/repos/github/Owner--Repo`、`.../contents/.gitmodules`
+- 克隆：`https://git.gtahub.st/github/Owner--Repo.git`
+- 「打开项目仓库」也跟着换源
+
+注意：镜像只收录**上游项目**（`fxceless/victory-fork`、`Marvisak/VIctory`、`avatarmanz/VIctory-7900XTX` 等），你自己的 `DKTTT/*` 仓库没有镜像 —— 选镜像源下载自己的构建会 404，换回 `GitHub` 即可。
+
+## [v1.10.5] - 2026-11-27
+
+### 新增：设置编辑器工具（`settings-editor.ps1`）
+
+把游戏存档里的 ASAV 设置以 JSON 形式查看/编辑，按 joaat 键定位字段。
+
+---
+
+## [v1.10.4] - 2026-11-27
+
+### 新增：自动进游戏
+
+启动游戏后自动在游戏窗口里发 Enter / A（带前台判断，不在前台就不抢），跳过标题/存档确认。
+
+---
+
+## [v1.10.3] - 2026-11-27
+
+### 变更：所有构建共用一份存档
+
+`DATA_DIR` 统一为 `<存档根>\perf-data`，换构建不用再搬存档。
+
+---
+
+## [v1.10.2] - 2026-11-27
+
+### 新增：TDR 超时按钮
+
+一键调高/恢复显卡 TDR 超时（设备被驱动移除 0x887A0007 时的缓解手段），并对 NVIDIA legacy 构建给出提示。
+
+---
 ## [v1.10.1] - 2026-11-27
 
 ### 新增：游戏退出/崩溃后自动“翻译”日志
@@ -618,3 +670,33 @@ releaseAssets=0 → 自动转源码 ZIP
 - 主版本 `1.x`：启动器功能集
 - 次版本：新增功能（v1.2 排行榜、v1.3 键盘映射、v1.4 拉取构建、v1.5 Release 兜底、v1.6 崩溃记录、v1.7 排版修复、v1.8 推荐算法 v2）
 - 修订版本 `.x`：问题修复（v1.3.1 多开、v1.7.1 扫描兜底、v1.7.2 任意盘扫描、v1.7.3 盘符容错）
+
+## [v1.10.2] - 2026-11-27
+
+### 新增
+- **设置 TDR 超时按钮**（运行页）：一键把 GPU 超时从默认 ~2 秒调到 60 秒，用于修复「设备移除 / 驱动重置」崩溃（需要管理员权限，改完重启生效）；页面常驻显示当前 TDR 值
+- **N 卡 + legacy/[exe] 构建警告**：选中 legacy（不支持 RENDER_SCALE）或非 diag/release 的 [exe] 构建时，日志明确提示「VICTORY_SKIP_PIPELINES 不生效、光追关不掉、容易设备移除」，并建议改用 vf-nvidia 的 diag 构建
+
+## [v1.10.3] - 2026-11-27
+
+### 改进
+- **所有构建共用同一份存档**：DATA_DIR 统一为 `<存档根>\perf-data`，换构建/换分支不再丢进度、不用搬存档
+- 配置建议：CacheRoot=E:\gta6（复用已预热缓存）、SaveRoot=E:\gta6\work（现有存档）、Height=720
+
+### 使用（复现 ~15-17fps）
+1. 构建选 `vf-nvidia [diag]`（release/legacy 不行，光追跳过不生效）
+2. 勾选「关闭光追」、分辨率 720p（想再快选 480p）
+3. 点「检查预热状态」确认缓存 OK（E:\gta6\cache-nvidia 已预热），然后启动
+
+## [v1.10.4] - 2026-11-27
+
+### 新增
+- **自动进游戏（回车/A）**：运行页新增复选框（默认开）。启动游戏后自动按 Enter+A 推进加载画面：
+  - 游戏窗口在**前台** → 真实 SendInput
+  - 不在前台 → **只向游戏窗口定向 PostMessage**，绝不发到其它窗口（不会瞎按）
+  - 检测到进入世界（draws>1500）自动停止；日志 `auto-enter.log`
+- 运行页三个复选框排成一行：①关闭启动器时结束游戏 ②关闭光追 ③自动进游戏
+
+### 研究记录（画质设置）
+- 存档 `SettingsProfileSettings\v6\0` 是 ASAV 包装的明文 JSON（260 项，键为 `$0x` 哈希，值多为 0-10 画质档）
+- 直接改文件会被游戏按内容哈希替换（文件名为 `SettingsProfileSettings~<hash>`），需逆向哈希算法 + 设置名映射后才能做"树木质量/视距"菜单
