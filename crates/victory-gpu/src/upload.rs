@@ -115,28 +115,15 @@ impl Upload {
                 let preferred = n.max(ARENA / BLOCK);
                 // A title memory pool can leave only holes smaller than a
                 // whole arena once it has grown (the late cutscenes do): the
-                // blocks this request needs may still fit. Try the preferred
-                // arena, then halves down to exactly what is needed. The
-                // structure builder writes through the pointer without
-                // looking for null, so a 4 MiB request that fails when 1 MiB
-                // would do is a crash, not a fallback.
-                let mut blocks = preferred;
-                let (at, blocks) = loop {
-                    if let Some(at) = reserve(blocks * BLOCK) {
-                        break (at, blocks);
-                    }
-                    if blocks <= n {
-                        return None;
-                    }
-                    blocks = (blocks / 2).max(n);
+                // blocks this request needs may still fit. The structure
+                // builder writes through the pointer without looking for
+                // null, so a 4 MiB request that fails when 64 KiB would do is
+                // a crash, not a fallback.
+                let (at, blocks) = match reserve(preferred * BLOCK) {
+                    Some(at) => (at, preferred),
+                    None if preferred > n => (reserve(n * BLOCK)?, n),
+                    None => return None,
                 };
-                if blocks < preferred {
-                    tracing::warn!(
-                        preferred_bytes = preferred * BLOCK,
-                        bytes = blocks * BLOCK,
-                        "only a smaller list upload arena fits the free low memory"
-                    );
-                }
                 crate::shadow::register(at, at as u64, (blocks * BLOCK) as u64);
                 tracing::info!(at = format_args!("{at:#x}"), bytes = blocks * BLOCK, "memory for lists' uploads, where shaders reach it by address");
                 let mut arenas = ARENAS.lock().unwrap_or_else(|e| e.into_inner());
