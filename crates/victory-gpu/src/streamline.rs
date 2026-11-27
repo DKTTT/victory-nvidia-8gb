@@ -356,6 +356,7 @@ static CHECKING: AtomicBool = AtomicBool::new(false);
 /// left off.
 pub fn init(asked: &Asked) -> Available {
     if !asked.any() {
+        record_facts(asked, &Available::default(), false);
         return Available::default();
     }
     let fsr = asked.framegen && crate::fsr::selected() && line_asked();
@@ -367,9 +368,11 @@ pub fn init(asked: &Asked) -> Available {
     }
     let mut nvidia = asked.clone();
     if crate::fsr::selected() { nvidia.framegen = false; nvidia.present_hook = false; }
+    let mut files_missing = false;
     let mut available = if nvidia.any() { match load_and_init(&nvidia, true) {
         Ok(available) => available,
         Err(why) => {
+            files_missing = true;
             tracing::warn!(
                 folder = %asked.dir.display(),
                 "Streamline: {why}; NVIDIA features stay off"
@@ -378,6 +381,7 @@ pub fn init(asked: &Asked) -> Available {
         }
     } } else { Available::default() };
     available.framegen |= crate::fsr::ready();
+    record_facts(asked, &available, files_missing);
     available
 }
 
@@ -2224,4 +2228,115 @@ pub(crate) fn line(frames: f64) {
             );
         }
     }
+}
+
+/// What the start found out about frame generation, said for the first 30 s
+/// (`host::panel::Notice` reads [`notice`]). ASCII only: the panel's glyphs are.
+struct Facts {
+    adapter: String,
+    dlss: bool,
+    dlss_off: bool,
+    files_missing: bool,
+    addon: bool,
+    framegen_asked: bool,
+    framegen_ready: bool,
+    fsr_asked: bool,
+    fsr_loaded: bool,
+}
+
+static FACTS: std::sync::OnceLock<Facts> = std::sync::OnceLock::new();
+
+fn record_facts(asked: &Asked, available: &Available, files_missing: bool) {
+    let addon = ADDON.get().is_some_and(Option::is_some);
+    let _ = FACTS.set(Facts {
+        adapter: adapter_name(),
+        dlss: available.dlss,
+        dlss_off: !asked.dlss,
+        files_missing,
+        addon,
+        framegen_asked: asked.framegen,
+        framegen_ready: available.framegen,
+        fsr_asked: crate::fsr::selected(),
+        fsr_loaded: crate::fsr::ready(),
+    });
+}
+
+/// The name of the PC adapter this process starts its device on.
+fn adapter_name() -> String {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4,
+    };
+    // SAFETY: plain DXGI queries; every interface is released by dropping it.
+    unsafe {
+        let factory: windows::core::Result<IDXGIFactory4> =
+            CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0));
+        let Ok(factory) = factory else {
+            return "?".to_owned();
+        };
+        let adapter = match crate::adapter::wanted() {
+            Some(luid) => factory.EnumAdapterByLuid::<IDXGIAdapter1>(luid).ok(),
+            None => factory.EnumAdapters1(0).ok(),
+        };
+        let Some(adapter) = adapter else {
+            return "?".to_owned();
+        };
+        let Ok(desc) = adapter.GetDesc1() else {
+            return "?".to_owned();
+        };
+        let name: String = desc
+            .Description
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from_u32(u32::from(c)).unwrap_or('?'))
+            .collect();
+        if name.is_empty() { "?".to_owned() } else { name }
+    }
+}
+
+/// What this card runs for frame generation and upscaling, and why not, as
+/// the notice at the start shows it (uppercase ASCII lines of at most 52
+/// characters).
+pub fn notice() -> Vec<String> {
+    let Some(f) = FACTS.get() else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!("GPU {}", f.adapter)];
+    lines.push(format!(
+        "DLSS UPSCALING {}",
+        if f.dlss { "ON" } else { "OFF" }
+    ));
+    let frame_gen = if f.fsr_loaded {
+        "FRAME GEN FSR 3 2X".to_owned()
+    } else if f.framegen_ready {
+        "FRAME GEN DLSS READY".to_owned()
+    } else if f.fsr_asked && !f.fsr_loaded {
+        "FRAME GEN OFF: AMDS FSR FILES MISSING".to_owned()
+    } else if f.framegen_asked && f.files_missing {
+        "FRAME GEN OFF: NVIDIA FILES MISSING".to_owned()
+    } else if f.framegen_asked && f.addon {
+        "FRAME GEN OFF: DLSSG ADD-ON FAILED".to_owned()
+    } else if f.framegen_asked {
+        "FRAME GEN OFF: NEEDS RTX 40 OR ADD-ON".to_owned()
+    } else {
+        "FRAME GEN OFF (F1 MENU CAN ENABLE IT)".to_owned()
+    };
+    lines.push(frame_gen.replace("AMDS", "AMD'S"));
+    if f.dlss_off && f.fsr_loaded {
+        lines.push("FSR NEEDS DLSS UPSCALING ON THIS PROFILE".to_owned());
+    }
+    lines
+        .into_iter()
+        .map(|l| l.chars().take(52).collect())
+        .collect()
+}
+
+/// [`notice`] for the launcher's console line before the title starts.
+pub fn notice_at_start() -> Vec<String> {
+    notice()
+}
+
+/// AMD FSR 3 frame generation's runtime is loaded and ready (the launcher
+/// keeps the title on its FidelityFX path for it).
+pub fn fsr_ready() -> bool {
+    crate::fsr::ready()
 }
