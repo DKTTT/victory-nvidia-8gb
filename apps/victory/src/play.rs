@@ -393,6 +393,22 @@ pub(crate) fn prepare(o: &Play) -> Result<Ready> {
                 .into_iter()
                 .find(|d| d.join("version.dll").is_file())
         });
+    // AMD's FidelityFX runtime (FSR 3.1 frame generation) ships as `amd-sdk/` beside
+    // victory.exe; Streamline's DLSS-G path is unaffected.
+    let fsr = s
+        .get("VICTORY_FSR_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|d| d.join("amd_fidelityfx_dx12.dll").is_file())
+        .or_else(|| {
+            [here.join("amd-sdk"), here.join("..").join("amd-sdk")]
+                .into_iter()
+                .find(|d| d.join("amd_fidelityfx_dx12.dll").is_file())
+        });
+    if !s.contains_key("VICTORY_FSR_DIR")
+        && let Some(dir) = &fsr
+    {
+        s.insert("VICTORY_FSR_DIR".to_owned(), dir.to_string_lossy().into_owned());
+    }
     let mut restart = format!("play {}", quoted(&exe));
     if o.no_framegen_ready {
         restart.push_str(" --no-framegen-ready");
@@ -400,6 +416,10 @@ pub(crate) fn prepare(o: &Play) -> Result<Ready> {
     if let Some(dir) = &addon {
         let dir = dir.to_string_lossy().replace('\'', "''");
         restart.push_str(&format!(" --set \"VICTORY_DLSSG_SM86_DIR={dir}\""));
+    }
+    if let Some(dir) = &fsr {
+        let dir = dir.to_string_lossy().replace('\'', "''");
+        restart.push_str(&format!(" --set \"VICTORY_FSR_DIR={dir}\""));
     }
     s.insert("VICTORY_MENU_FILE".to_owned(), menu_file.to_string_lossy().into_owned());
     s.insert("VICTORY_MENU_PLAY".to_owned(), program.to_string_lossy().into_owned());
