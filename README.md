@@ -3,6 +3,9 @@
 
 > 中文 · [English](#english) · [详细使用说明](docs/CN-使用说明.md) · [Detailed usage](docs/EN-USAGE.md) · [更新日志 / Changelog](docs/CHANGELOG.md)
 
+**🚀 第一次用？先看这个 → [从零开始：下载 → 解压 → 启动 → 设置 → 排错](docs/从零开始.md)（含英文摘要）**
+**New here? Read [the from-scratch guide](docs/从零开始.md) first (English digest at the end).**
+
 本项目是 [trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA) 的个人中文化 + 8G 优化分支。
 它把 Xbox Series 版 GTA6（v1.0.2.1）的官方可执行文件转译到 Windows PC 上运行。
 **仓库与发布包不含任何游戏文件**，你需要自备游戏转储（dump）。
