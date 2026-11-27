@@ -103,8 +103,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         bad.len(),
         all.len()
     );
-    let chunks: Vec<&[usize]> = all.chunks(AT_ONCE).collect();
+    let chunks: Vec<&[usize]> = all.chunks(at_once()).collect();
     let next = AtomicUsize::new(0);
+    let progress = Mutex::new(Instant::now());
     let state = Mutex::new((Vec::<f64>::new(), 0usize, 0usize));
     let done_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&done_file)?);
     // (Read back by the runs: these are made beside the others, not before.)
@@ -124,8 +125,19 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                             state.0.push(ms);
                             state.1 += usize::from(!there);
                             let count = state.0.len();
-                            if count % 1000 == 0 {
-                                println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
+                            let mut prog = lock(&progress);
+                            if count.is_multiple_of(100) || prog.elapsed() >= Duration::from_secs(2) {
+                                *prog = Instant::now();
+                                let elapsed = began.elapsed().as_secs_f64();
+                                let rate = count as f64 / elapsed.max(0.001);
+                                let left = all.len().saturating_sub(count) as f64 / rate.max(0.1);
+                                println!(
+                                    "[progress] {count}/{} ({:.1}%) | {} | {rate:.1}/s | ETA {}",
+                                    all.len(),
+                                    count as f64 * 100.0 / all.len().max(1) as f64,
+                                    mmss(elapsed),
+                                    mmss(left)
+                                );
                             }
                             drop(state);
                             let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
@@ -147,12 +159,14 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         }
     });
     let (mut times, refused, crashed) = state.into_inner().unwrap_or_else(|e| e.into_inner());
+    let spent = began.elapsed().as_secs_f64();
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times.get((times.len() as f64 * q) as usize).copied().unwrap_or(0.0);
     println!(
-        "{} made in {:.0} s ({refused} have no host pipeline, {crashed} ended their process); ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
+        "[done] {} made in {:.0} s (average {:.1}/s; {refused} have no host pipeline, {crashed} ended their process); ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
         times.len(),
-        began.elapsed().as_secs_f64(),
+        spent,
+        times.len() as f64 / spent.max(0.001),
         at(0.5),
         at(0.9),
         at(0.99),
@@ -190,17 +204,24 @@ pub fn into_library(jobs: Option<usize>) -> Result<()> {
     println!("into the pipeline library: {} pipelines (loading and slow ones), {threads} threads", all.len());
     let began = Instant::now();
     let (count, made) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let progress = Mutex::new(Instant::now());
     std::thread::scope(|s| {
         for t in 0..threads {
             let these: Vec<usize> = all.iter().copied().skip(t).step_by(threads).collect();
             let (count, made, total, dir) = (&count, &made, all.len(), &dir);
+            let progress = &progress;
             s.spawn(move || {
                 known::make(dir, &these, |_, came| {
                     let Some((_, there)) = came else { return };
                     made.fetch_add(usize::from(there), Ordering::Relaxed);
                     let n = count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n.is_multiple_of(500) {
-                        println!("{n} of {total} in the library, {:.0} s", began.elapsed().as_secs_f64());
+                    let mut prog = lock(&progress);
+                    if n.is_multiple_of(100) || prog.elapsed() >= Duration::from_secs(2) {
+                        *prog = Instant::now();
+                        let elapsed = began.elapsed().as_secs_f64();
+                        let rate = n as f64 / elapsed.max(0.001);
+                        let left = total.saturating_sub(n) as f64 / rate.max(0.1);
+                        println!("[library] {n}/{total} in the pipeline library | {} | {rate:.1}/s | ETA {}", mmss(elapsed), mmss(left));
                     }
                 });
             });
@@ -218,6 +239,12 @@ pub fn into_library(jobs: Option<usize>) -> Result<()> {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Seconds as `12m34s`, for the progress lines.
+fn mmss(seconds: f64) -> String {
+    let s = seconds.max(0.0) as u64;
+    format!("{}m{:02}s", s / 60, s % 60)
 }
 
 /// Has a process make `these`; how many it made, and how it ended if not well.

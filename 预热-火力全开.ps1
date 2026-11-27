@@ -28,6 +28,42 @@ function Say([string]$text) {
     Write-Host $text
     Add-Content -LiteralPath $LogPath -Value $text -Encoding UTF8
 }
+function Convert-Progress([string]$line) {
+    if ($line -match '^\[progress\] (\d+)/(\d+) \(([\d.]+)%\) \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('进度 {0}/{1}（{2}%）| 已用 {3} | {4} | 预计剩余 {5}' -f $matches[1], $matches[2], $matches[3], $matches[4].Trim(), $matches[5].Trim(), $matches[6].Trim())
+    }
+    if ($line -match '^\[library\] (\d+)/(\d+) in the pipeline library \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('写管线库 {0}/{1} | 已用 {2} | {3} | 预计剩余 {4}' -f $matches[1], $matches[2], $matches[3].Trim(), $matches[4].Trim(), $matches[5].Trim())
+    }
+    if ($line -match '^\[done\] (\d+) made in ([\d.]+) s \(average ([\d.]+)/s') {
+        return ('[完成] 共 {0} 条，用了 {1} 秒，平均 {2} 条/秒' -f $matches[1], $matches[2], $matches[3])
+    }
+    return $line
+}
+function Convert-Progress([string]$line) {
+    if ($line -match '^\[progress\] (\d+)/(\d+) \(([\d.]+)%\) \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('进度 {0}/{1}（{2}%）| 已用 {3} | {4} | 预计剩余 {5}' -f $matches[1], $matches[2], $matches[3], $matches[4].Trim(), $matches[5].Trim(), $matches[6].Trim())
+    }
+    if ($line -match '^\[library\] (\d+)/(\d+) in the pipeline library \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('写管线库 {0}/{1} | 已用 {2} | {3} | 预计剩余 {4}' -f $matches[1], $matches[2], $matches[3].Trim(), $matches[4].Trim(), $matches[5].Trim())
+    }
+    if ($line -match '^\[done\] (\d+) made in ([\d.]+) s \(average ([\d.]+)/s') {
+        return ('[完成] 共 {0} 条，用了 {1} 秒，平均 {2} 条/秒' -f $matches[1], $matches[2], $matches[3])
+    }
+    return $line
+}
+function Convert-Progress([string]$line) {
+    if ($line -match '^\[progress\] (\d+)/(\d+) \(([\d.]+)%\) \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('进度 {0}/{1}（{2}%）| 已用 {3} | {4} | 预计剩余 {5}' -f $matches[1], $matches[2], $matches[3], $matches[4].Trim(), $matches[5].Trim(), $matches[6].Trim())
+    }
+    if ($line -match '^\[library\] (\d+)/(\d+) in the pipeline library \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('写管线库 {0}/{1} | 已用 {2} | {3} | 预计剩余 {4}' -f $matches[1], $matches[2], $matches[3].Trim(), $matches[4].Trim(), $matches[5].Trim())
+    }
+    if ($line -match '^\[done\] (\d+) made in ([\d.]+) s \(average ([\d.]+)/s') {
+        return ('[完成] 共 {0} 条，用了 {1} 秒，平均 {2} 条/秒' -f $matches[1], $matches[2], $matches[3])
+    }
+    return $line
+}
 function Phase([string]$title) {
     Say ''
     Say ('=' * 78)
@@ -38,7 +74,7 @@ function Run([string]$exe, [string[]]$arguments, [string]$what) {
     $began = Get-Date
     # 输出同时进控制台和日志
     & $exe @arguments 2>&1 | ForEach-Object {
-        $line = "$_"
+        $line = Convert-Progress "$_"
         Write-Host $line
         Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
     }
@@ -296,7 +332,7 @@ while ($round -lt $MaxWarmRounds) {
     $began = Get-Date
     $lines = @()
     & $exe @warmArgs 2>&1 | ForEach-Object {
-        $line = "$_"
+        $line = Convert-Progress "$_"
         $lines += $line
         Write-Host $line
         Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
