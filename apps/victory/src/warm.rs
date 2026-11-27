@@ -13,8 +13,33 @@ use anyhow::{Context, Result};
 use victory_hle::known_pipelines as known;
 
 /// Pipelines a process makes before another takes its place: the compiler's
-/// and the translations' memory goes with it.
+/// and the translations' memory goes with it. `VICTORY_WARM_BATCH` asks for
+/// another (1 to 2,000): fewer process starts, more memory.
 const AT_ONCE: usize = 40;
+
+/// How many pipelines one process makes before it is replaced.
+fn at_once() -> usize {
+    static BATCH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BATCH.get_or_init(|| {
+        std::env::var("VICTORY_WARM_BATCH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(AT_ONCE, |n| n.clamp(1, 2000))
+    })
+}
+
+/// The priority a warming process runs at: `idle` (the default, keeps the
+/// desktop smooth) unless `VICTORY_WARM_PRIORITY` says `normal`, `above` or
+/// `high` (the "fire at will" mode).
+fn child_priority() -> u32 {
+    static PRIORITY: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PRIORITY.get_or_init(|| match std::env::var("VICTORY_WARM_PRIORITY").map(|v| v.trim().to_lowercase()).as_deref() {
+        Ok("normal") => 0x20,      // NORMAL_PRIORITY_CLASS
+        Ok("above") => 0x8000,     // ABOVE_NORMAL_PRIORITY_CLASS
+        Ok("high") => 0x80,        // HIGH_PRIORITY_CLASS
+        _ => 0x40,                 // IDLE_PRIORITY_CLASS
+    })
+}
 /// A pipeline that takes longer is taken for one the compiler hangs on.
 const LONGEST: Duration = Duration::from_secs(180);
 
@@ -32,8 +57,18 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         return make(&dir, &these);
     }
     let began = Instant::now();
+    // (A first preload on a PC no run has written pipelines down on yet: none known.)
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     victory_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
-    let fingerprint = known::fingerprint();
+    // The driver keeps what is made here by program path: made by another copy of
+    // this program, a pipeline is not made for this one.
+    let fingerprint = {
+        let program = std::env::current_exe().map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let mut h = blake3::Hasher::new();
+        h.update(known::fingerprint().as_bytes());
+        h.update(program.as_bytes());
+        h.finalize().to_hex()[..16].to_owned()
+    };
     let done_file = dir.join("warm-done.txt");
     let bad_file = dir.join("warm-bad.txt");
     let keys = known::keys(&dir);
@@ -68,8 +103,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         bad.len(),
         all.len()
     );
-    let chunks: Vec<&[usize]> = all.chunks(AT_ONCE).collect();
+    let chunks: Vec<&[usize]> = all.chunks(at_once()).collect();
     let next = AtomicUsize::new(0);
+    let progress = Mutex::new(Instant::now());
     let state = Mutex::new((Vec::<f64>::new(), 0usize, 0usize));
     let done_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&done_file)?);
     // (Read back by the runs: these are made beside the others, not before.)
@@ -89,8 +125,19 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                             state.0.push(ms);
                             state.1 += usize::from(!there);
                             let count = state.0.len();
-                            if count % 1000 == 0 {
-                                println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
+                            let mut prog = lock(&progress);
+                            if count.is_multiple_of(100) || prog.elapsed() >= Duration::from_secs(2) {
+                                *prog = Instant::now();
+                                let elapsed = began.elapsed().as_secs_f64();
+                                let rate = count as f64 / elapsed.max(0.001);
+                                let left = all.len().saturating_sub(count) as f64 / rate.max(0.1);
+                                println!(
+                                    "[progress] {count}/{} ({:.1}%) | {} | {rate:.1}/s | ETA {}",
+                                    all.len(),
+                                    count as f64 * 100.0 / all.len().max(1) as f64,
+                                    mmss(elapsed),
+                                    mmss(left)
+                                );
                             }
                             drop(state);
                             let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
@@ -112,12 +159,14 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         }
     });
     let (mut times, refused, crashed) = state.into_inner().unwrap_or_else(|e| e.into_inner());
+    let spent = began.elapsed().as_secs_f64();
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times.get((times.len() as f64 * q) as usize).copied().unwrap_or(0.0);
     println!(
-        "{} made in {:.0} s ({refused} have no host pipeline, {crashed} ended their process); ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
+        "[done] {} made in {:.0} s (average {:.1}/s; {refused} have no host pipeline, {crashed} ended their process); ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
         times.len(),
-        began.elapsed().as_secs_f64(),
+        spent,
+        times.len() as f64 / spent.max(0.001),
         at(0.5),
         at(0.9),
         at(0.99),
@@ -127,8 +176,75 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     Ok(())
 }
 
+/// `victory preload`'s last step: the pipelines a run makes while it loads
+/// (the early list) and those that take a second or more, made again in this
+/// process and stored in the host pipeline library the runs load at their
+/// start. `run` made them in processes of their own first, so the driver has
+/// them and they come quickly; those that ended a process are left out. Not
+/// all the known ones: one process holding the compiler's memory for 88,000
+/// pipelines is what `AT_ONCE` keeps `run` from.
+pub fn into_library(jobs: Option<usize>) -> Result<()> {
+    let dir = folder()?;
+    let cfg = victory_core::Config::load()?;
+    known::use_library(cfg.cache_subdir("shaders")?);
+    let keys = known::keys(&dir);
+    let read = |file: &str| std::fs::read_to_string(dir.join(file)).unwrap_or_default();
+    let (bad, early, slow) = (read("warm-bad.txt"), read("early-pipelines.txt"), read("slow-pipelines.txt"));
+    let bad: HashSet<&str> = bad.lines().filter_map(|l| l.split(' ').next()).collect();
+    let early: HashSet<&str> = early.lines().collect();
+    let slow: HashSet<&str> = slow.lines().filter_map(|l| l.split(' ').next()).filter(|k| !k.is_empty()).collect();
+    let mut all: Vec<usize> = (0..keys.len())
+        .filter(|&n| {
+            let key = keys[n].as_str();
+            !bad.contains(key) && (early.contains(key) || slow.contains(key))
+        })
+        .collect();
+    all.sort_by_key(|&n| (!early.contains(keys[n].as_str()), &keys[n]));
+    let threads = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()) * 2 / 3).max(1);
+    println!("into the pipeline library: {} pipelines (loading and slow ones), {threads} threads", all.len());
+    let began = Instant::now();
+    let (count, made) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let progress = Mutex::new(Instant::now());
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let these: Vec<usize> = all.iter().copied().skip(t).step_by(threads).collect();
+            let (count, made, total, dir) = (&count, &made, all.len(), &dir);
+            let progress = &progress;
+            s.spawn(move || {
+                known::make(dir, &these, |_, came| {
+                    let Some((_, there)) = came else { return };
+                    made.fetch_add(usize::from(there), Ordering::Relaxed);
+                    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+                    let mut prog = lock(&progress);
+                    if n.is_multiple_of(100) || prog.elapsed() >= Duration::from_secs(2) {
+                        *prog = Instant::now();
+                        let elapsed = began.elapsed().as_secs_f64();
+                        let rate = n as f64 / elapsed.max(0.001);
+                        let left = total.saturating_sub(n) as f64 / rate.max(0.1);
+                        println!("[library] {n}/{total} in the pipeline library | {} | {rate:.1}/s | ETA {}", mmss(elapsed), mmss(left));
+                    }
+                });
+            });
+        }
+    });
+    known::keep_library();
+    println!(
+        "{} of {} in the pipeline library in {:.0} s",
+        made.load(Ordering::Relaxed),
+        all.len(),
+        began.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Seconds as `12m34s`, for the progress lines.
+fn mmss(seconds: f64) -> String {
+    let s = seconds.max(0.0) as u64;
+    format!("{}m{:02}s", s / 60, s % 60)
 }
 
 /// Has a process make `these`; how many it made, and how it ended if not well.

@@ -40,6 +40,30 @@ function Convert-Progress([string]$line) {
     }
     return $line
 }
+function Convert-Progress([string]$line) {
+    if ($line -match '^\[progress\] (\d+)/(\d+) \(([\d.]+)%\) \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('进度 {0}/{1}（{2}%）| 已用 {3} | {4} | 预计剩余 {5}' -f $matches[1], $matches[2], $matches[3], $matches[4].Trim(), $matches[5].Trim(), $matches[6].Trim())
+    }
+    if ($line -match '^\[library\] (\d+)/(\d+) in the pipeline library \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('写管线库 {0}/{1} | 已用 {2} | {3} | 预计剩余 {4}' -f $matches[1], $matches[2], $matches[3].Trim(), $matches[4].Trim(), $matches[5].Trim())
+    }
+    if ($line -match '^\[done\] (\d+) made in ([\d.]+) s \(average ([\d.]+)/s') {
+        return ('[完成] 共 {0} 条，用了 {1} 秒，平均 {2} 条/秒' -f $matches[1], $matches[2], $matches[3])
+    }
+    return $line
+}
+function Convert-Progress([string]$line) {
+    if ($line -match '^\[progress\] (\d+)/(\d+) \(([\d.]+)%\) \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('进度 {0}/{1}（{2}%）| 已用 {3} | {4} | 预计剩余 {5}' -f $matches[1], $matches[2], $matches[3], $matches[4].Trim(), $matches[5].Trim(), $matches[6].Trim())
+    }
+    if ($line -match '^\[library\] (\d+)/(\d+) in the pipeline library \| ([^|]+) \| ([^|]+) \| ETA (.+)$') {
+        return ('写管线库 {0}/{1} | 已用 {2} | {3} | 预计剩余 {4}' -f $matches[1], $matches[2], $matches[3].Trim(), $matches[4].Trim(), $matches[5].Trim())
+    }
+    if ($line -match '^\[done\] (\d+) made in ([\d.]+) s \(average ([\d.]+)/s') {
+        return ('[完成] 共 {0} 条，用了 {1} 秒，平均 {2} 条/秒' -f $matches[1], $matches[2], $matches[3])
+    }
+    return $line
+}
 function Phase([string]$title) {
     Say ''
     Say ('=' * 78)
@@ -272,6 +296,18 @@ if (-not $SkipShaders) {
     if ($r.code -ne 0) { Say '（着色器编译有报错，后面仍会继续，可能还有个别着色器没编好）' }
 } else {
     Say '（跳过着色器编译）'
+}
+
+# 上一次被 Ctrl+C 打断时，正在做的管线会被误记进 warm-bad.txt（exit code 0xc000013a）。
+# 先剔掉这些误记，否则那几条永远不会再预热。
+$badFile = Join-Path (Join-Path $env:VICTORY_CACHE_DIR 'pipelines') 'warm-bad.txt'
+if (Test-Path -LiteralPath $badFile) {
+    $badLines = Get-Content -LiteralPath $badFile -Encoding UTF8 -ErrorAction SilentlyContinue
+    $kept = @($badLines | Where-Object { $_ -notmatch '0xc000013a' })
+    if ($kept.Count -ne $badLines.Count) {
+        Set-Content -LiteralPath $badFile -Value $kept -Encoding UTF8
+        Say ('已清理上次 Ctrl+C 误记的管线：{0} 条（会重新预热）' -f ($badLines.Count - $kept.Count))
+    }
 }
 
 # ---------- 3. 管线预热：反复做到没有新管线 ----------
