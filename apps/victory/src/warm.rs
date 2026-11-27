@@ -13,8 +13,33 @@ use anyhow::{Context, Result};
 use victory_hle::known_pipelines as known;
 
 /// Pipelines a process makes before another takes its place: the compiler's
-/// and the translations' memory goes with it.
+/// and the translations' memory goes with it. `VICTORY_WARM_BATCH` asks for
+/// another (1 to 2,000): fewer process starts, more memory.
 const AT_ONCE: usize = 40;
+
+/// How many pipelines one process makes before it is replaced.
+fn at_once() -> usize {
+    static BATCH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BATCH.get_or_init(|| {
+        std::env::var("VICTORY_WARM_BATCH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(AT_ONCE, |n| n.clamp(1, 2000))
+    })
+}
+
+/// The priority a warming process runs at: `idle` (the default, keeps the
+/// desktop smooth) unless `VICTORY_WARM_PRIORITY` says `normal`, `above` or
+/// `high` (the "fire at will" mode).
+fn child_priority() -> u32 {
+    static PRIORITY: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PRIORITY.get_or_init(|| match std::env::var("VICTORY_WARM_PRIORITY").map(|v| v.trim().to_lowercase()).as_deref() {
+        Ok("normal") => 0x20,      // NORMAL_PRIORITY_CLASS
+        Ok("above") => 0x8000,     // ABOVE_NORMAL_PRIORITY_CLASS
+        Ok("high") => 0x80,        // HIGH_PRIORITY_CLASS
+        _ => 0x40,                 // IDLE_PRIORITY_CLASS
+    })
+}
 /// A pipeline that takes longer is taken for one the compiler hangs on.
 const LONGEST: Duration = Duration::from_secs(180);
 

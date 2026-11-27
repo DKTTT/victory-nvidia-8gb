@@ -12,6 +12,7 @@ param(
     [int]$WarmLimit = 0,       # >0：这一轮最多做这么多条（试跑用）
     [switch]$Fast,             # 快速模式：只做加载期用到的管线（--used），不跑全量、不写管线库
     [switch]$NoGui,            # 不弹确认窗（自动化/远程用）
+    [switch]$Turbo,            # 暴力模式：进程数加倍 + 高优先级 + 更大批量
     [switch]$Used,             # 用 --used：只预热加载期真正画过的管线
     [switch]$Yes
 )
@@ -144,6 +145,14 @@ if (-not $env:VICTORY_DATA_DIR) {
 }
 New-Item -ItemType Directory -Force -Path $env:VICTORY_CACHE_DIR | Out-Null
 $env:VICTORY_PROCESS_PRIORITY = 'high'
+
+# 暴力模式：进程数加倍、子进程升到高优先级、每进程做更多管线（少开关进程）
+if ($Turbo) {
+    $WarmJobs = [Math]::Max(4, $cores * 2)
+    $env:VICTORY_WARM_PRIORITY = 'high'
+    $env:VICTORY_WARM_BATCH = '120'
+    if (-not $env:VICTORY_LOG) { $env:VICTORY_LOG = 'warn' }
+}
 Say ('逻辑核心：{0}（{1}）；着色器编译线程：{2}；管线预热进程：{3}' -f $cores, $tier, $Jobs, $WarmJobs)
 
 # 全量预热前确认（-Fast 只做几分钟，不拦）
@@ -194,6 +203,15 @@ if (-not $Fast -and -not $Yes) {
     }
 }
 Say ('缓存目录：' + $env:VICTORY_CACHE_DIR)
+if ($Turbo) { Say ('暴力模式：{0} 个预热进程、高优先级、批量 120（桌面会明显变卡）' -f $WarmJobs) }
+
+# 把预热子进程的优先级提上来：新版 exe 自己会照 VICTORY_WARM_PRIORITY 执行，
+# 旧版（v5）子进程生来是 Idle，这里每 2 秒扫一次帮它们升到 High。
+$watcher = $null
+if ($Turbo) {
+    $cmd = "while (`$true) { Get-CimInstance Win32_Process -Filter \`"Name='victory.exe'\`" -EA SilentlyContinue | Where-Object { `$_.CommandLine -match '--these' } | ForEach-Object { try { (Get-Process -Id `$_.ProcessId -EA SilentlyContinue).PriorityClass = 'High' } catch {} }; Start-Sleep -Seconds 2 }"
+    $watcher = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $cmd) -PassThru -WindowStyle Hidden
+}
 Say ('日志：' + $LogPath)
 
 # ---------- 2. 着色器全量编译 ----------
@@ -291,6 +309,7 @@ foreach ($pair in @(@{name = '着色器缓存'; path = $shaders }, @{name = '管
     }
 }
 Say ''
-Say '预热完成。现在双击「启动.bat」进游戏，第一次进世界会明显更顺。'
+if ($watcher) { Stop-Process -Id $watcher.Id -Force -EA SilentlyContinue }
+Say '预热完成。现在双击「启动.bat」进游戏，第一次进世界会明显更顺。' 
 Say '以后更新了构建或显卡驱动，建议再跑一次本脚本。'
 Say ('完整日志：' + $LogPath)
