@@ -293,7 +293,7 @@ if ($ShadersOnly) {
             foreach ($t in $tierList) {
                 $b = New-Object System.Windows.Forms.Button
                 $b.Text = ('{0}（{1}）' -f $t.name, $t.eta)
-                $b.Location = New-Object System.Drawing.Point($x, $y)
+                $b.Location = New-Object System.Drawing.Point -ArgumentList ([int]$x), ([int]$y)
                 $b.Size = New-Object System.Drawing.Size(140, 40)
                 $b.Tag = $t.key
                 $b.Add_Click({ $script:chosen = $this.Tag; $this.FindForm().Close() })
@@ -302,7 +302,7 @@ if ($ShadersOnly) {
             }
             $cancel = New-Object System.Windows.Forms.Button
             $cancel.Text = '取消'
-            $cancel.Location = New-Object System.Drawing.Point(20, $y + 52)
+            $cancel.Location = New-Object System.Drawing.Point -ArgumentList 20, ($y + 52)
             $cancel.Size = New-Object System.Drawing.Size(120, 34)
             $cancel.Add_Click({ $script:chosen = 'cancel'; $this.FindForm().Close() })
             $form.Controls.Add($cancel)
