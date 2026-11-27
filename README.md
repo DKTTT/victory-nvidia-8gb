@@ -67,6 +67,7 @@ Each zip is ~61 MB (121 MB extracted) with all runtimes; bring your own v1.0.2.1
 | `启动-不插帧(最稳).bat` | 关闭帧生成 / FG off |
 | `启动-8G平衡.bat` | FSR 2X + 少一级 mip + 显存窗口 |
 | `预热.bat` | 预先编译着色器 / preload shaders |
+| `预热-火力全开.bat` | 全核编译全部着色器 → 反复预热所有管线 → 写入管线库（可断点续跑，第一次很久）/ full-power preload: all shaders, every pipeline, baked into the pipeline library |
 | `重置F1设置(卡崩时用).bat` | 清空已保存的 F1 设置 / clear F1 settings |
 | `victory.exe` | 转译层本体 / the layer |
 | `nvidia-sdk/` `amd-sdk/` `dlssg-sm86/` | NVIDIA / AMD / DLSS-G 运行库与插件 / runtimes |

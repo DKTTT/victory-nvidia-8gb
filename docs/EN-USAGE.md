@@ -23,6 +23,8 @@ The layer translates the Xbox Series build of GTA6 (v1.0.2.1) to Windows.
 2. Extract the **whole folder** (`amd-sdk`, `nvidia-sdk` and `dlssg-sm86` are all required).
 3. Double-click `启动.bat` ("start").
 4. The first start is slow (shaders are translated); later you can run `预热.bat` ("preload") first.
+   For the full job (all pipelines, baked into the pipeline library) run `预热-火力全开.bat`:
+   it can take a long time, and Ctrl+C is safe — the next run continues where it stopped.
 
 > Game folder: the bat looks inside its own folder and at `E:\GTA6.Xbox.v1.0.2.1-CYBERLEEK`;
 > otherwise put the zip inside your game folder or pass it: `启动.bat "D:\your\game\folder"`.
@@ -37,6 +39,7 @@ The layer translates the Xbox Series build of GTA6 (v1.0.2.1) to Windows.
 | `启动-不插帧(最稳).bat` | Frame generation off (for troubleshooting) |
 | `启动-8G平衡.bat` | FSR 2x + one mip level dropped + 256 MB card window |
 | `预热.bat` | Translate shaders ahead of time (no game start) |
+| `预热-火力全开.bat` | Full-power preload: every shader (all cores), every pipeline, baked into the pipeline library; long but resumable |
 | `重置F1设置(卡崩时用).bat` | Clears `%LOCALAPPDATA%\victory\victory-settings.txt` (backed up as `.bak`) |
 
 ## 4. The F1 menu
