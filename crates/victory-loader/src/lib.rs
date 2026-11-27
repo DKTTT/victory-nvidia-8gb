@@ -23,6 +23,9 @@
 
 #[cfg(windows)]
 mod console_insn;
+// LOCAL (port of victory-perf): VICTORY_RENDER_SCALE / VICTORY_OWN_UPSCALER / VICTORY_NO_WATCHDOG title patches.
+#[cfg(windows)]
+mod hooks;
 mod crash;
 pub mod frame_rate;
 pub mod prepare;
