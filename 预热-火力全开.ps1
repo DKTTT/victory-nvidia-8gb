@@ -90,6 +90,16 @@ if (-not (Test-Path -LiteralPath $exe)) {
     exit 1
 }
 
+# 探测这个 victory.exe 支持什么：v5 没有 preload（写管线库），但有 warm --used
+function Test-Subcommand([string]$name) {
+    $o = & $exe $name --help 2>&1
+    return ($LASTEXITCODE -eq 0)
+}
+$hasPreload = Test-Subcommand 'preload'
+$warmHelp = (& $exe warm --help 2>&1 | Out-String)
+$hasUsed = $warmHelp -match '--used'
+Say ('功能探测：preload（写管线库）=' + $(if ($hasPreload) { '有' } else { '无（v5 正式版没有，会自动跳过）' }) + '；warm --used=' + $(if ($hasUsed) { '有' } else { '无' }))
+
 # 正在运行游戏就别预热了（会抢 CPU/显存，还会锁缓存）
 $running = Get-Process -Name 'victory' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($running) {
@@ -198,7 +208,12 @@ if (-not $SkipShaders) {
 # ---------- 3. 管线预热：反复做到没有新管线 ----------
 if ($Fast) {
     Phase '第 2 步 / 共 3 步：快速预热（只做加载期用到的管线）'
-    $r = Run $exe @('warm', '--used', '--jobs', "$WarmJobs") '快速预热加载期管线'
+    if ($hasUsed) {
+        $r = Run $exe @('warm', '--used', '--jobs', "$WarmJobs") '快速预热加载期管线'
+    } else {
+        # 没有 --used：warm 本来就先做加载期管线，用 --limit 截前 4000 条（几分钟）
+        $r = Run $exe @('warm', '--limit', '4000', '--jobs', "$WarmJobs") '快速预热（先做加载期优先的 4000 条）'
+    }
     if ($r.code -ne 0) { Say '（快速预热返回非 0，可忽略）' }
     Phase '完成（快速模式）'
     Say '快速模式：没有预热全部管线，也没有写管线库。'
@@ -214,7 +229,9 @@ $lastTodo = -1
 while ($round -lt $MaxWarmRounds) {
     $round++
     $warmArgs = @('warm', '--jobs', "$WarmJobs")
-    if ($Used) { $warmArgs += '--used' }
+    if ($Used) {
+        if ($hasUsed) { $warmArgs += '--used' } else { Say '（这个版本没有 warm --used，按全部管线预热）' }
+    }
     if ($WarmLimit -gt 0) { $warmArgs += @('--limit', "$WarmLimit") }
     if ($FullRebuild -and $round -eq 1) { $warmArgs += '--again' }
     Say ''
@@ -252,10 +269,13 @@ while ($round -lt $MaxWarmRounds) {
 }
 
 # ---------- 4. 写成管线库（进游戏加载时用）----------
-if (-not $SkipIntoLibrary) {
+if (-not $SkipIntoLibrary -and $hasPreload) {
     Phase '第 3 步 / 共 3 步：把加载期与慢管线写进管线库'
     $r = Run $exe @('preload', $GameDir) '写入管线库'
     if ($r.code -ne 0) { Say '（写入管线库返回非 0，可以忽略或重跑一次）' }
+} elseif (-not $SkipIntoLibrary) {
+    Say '这一版 victory.exe 没有 preload（写管线库）命令（v5 正式版就是这样），跳过第 3 步。'
+    Say '着色器编译 + 管线预热已经完成，直接启动游戏即可。'
 } else {
     Say '（跳过写入管线库）'
 }
