@@ -54,7 +54,7 @@ struct Item {
 /// 中文菜单的静态文案。
 const TITLE: &str = "设置";
 const TITLE_RIGHT: &str = "F1 或 ESC 关闭";
-const HELP: &str = "上下选择  左右修改  Enter 执行";
+const HELP: &str = "上下选择  左右修改  回车执行";
 const NOTE: &str = "* = 已修改：下次启动生效（即时=立即生效）";
 const MARKS: [&str; 2] = [" 即时", " *"];
 
