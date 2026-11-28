@@ -160,8 +160,8 @@ impl Counters {
 }
 
 /// The process's memory in bytes: in physical memory, and committed
-/// (private bytes).
-fn process_memory() -> (u64, u64) {
+/// (private bytes). The performance overlay reads the same numbers.
+pub(crate) fn process_memory() -> (u64, u64) {
     use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut c = PROCESS_MEMORY_COUNTERS {

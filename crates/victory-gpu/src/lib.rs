@@ -60,9 +60,13 @@ mod port;
 mod land;
 pub mod list;
 pub mod object;
+#[cfg(windows)]
+mod overlay;
 pub mod pipeline;
 #[cfg(windows)]
 mod picked;
+#[cfg(windows)]
+mod pixels;
 #[cfg(windows)]
 mod pool;
 #[cfg(all(windows, feature = "diagnostics"))]
@@ -81,6 +85,8 @@ pub mod root;
 mod safecopy;
 #[cfg(windows)]
 mod sampler;
+#[cfg(windows)]
+mod screenshot;
 #[cfg(windows)]
 pub mod shader_cache;
 #[cfg(windows)]

@@ -3957,7 +3957,7 @@ mod font;
 
 mod font_cn;
 mod menu;
-mod panel;
+pub(crate) mod panel;
 mod place;
 mod send;
 pub(crate) use send::{goes_as_words, words_under};
@@ -9431,6 +9431,8 @@ impl Meter {
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
         METER_FPS_TENTHS.store((fps * 10.0).round() as u32, Ordering::Relaxed);
         let draws = (drawn - self.drawn) as f64 / frames;
+        // (Victory) The performance overlay's panel (F10) reads the same meter.
+        crate::overlay::set_frame(fps, ms, draws);
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
         // Of a frame, ms preparing submissions and ms waiting for the GPU.
         let [cpu, gpu] = [0, 1].map(|i| {
@@ -9980,12 +9982,14 @@ impl Host {
                 return None;
             };
             // Sent ahead ([`late_free_present`]) unless the frame is to be
-            // read back at once (a saved or listed frame): then a list of
-            // its own, one whose last flight has finished or a new one.
+            // read back at once (a saved or listed frame, or a screenshot):
+            // then a list of its own, one whose last flight has finished or a
+            // new one.
+            let shooting = crate::screenshot::take();
             #[cfg(feature = "diagnostics")]
-            let read_now = crate::capture::wanted(frame) || crate::capture::listed(frame);
+            let read_now = shooting || crate::capture::wanted(frame) || crate::capture::listed(frame);
             #[cfg(not(feature = "diagnostics"))]
-            let read_now = false;
+            let read_now = shooting;
             let slot = if late_free_present() && !read_now {
                 let finished = FINISHED.load(Ordering::Acquire);
                 p.ahead.iter().position(|(_, flown)| *flown <= finished).or_else(|| {
@@ -10110,6 +10114,24 @@ impl Host {
             };
             p.panel.draw(self, copy, &back, (width, height), format);
             p.menu.draw(self, copy, &back, (width, height), format);
+            // (Victory) F12: the frame as it is about to be shown (our panel
+            // and menu included) read back for the screenshot thread.
+            let shot = if shooting {
+                list.ResourceBarrier(&[transition(
+                    &back,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                )]);
+                let shot = crate::screenshot::read_back(&self.device, list, &back);
+                list.ResourceBarrier(&[transition(
+                    &back,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                )]);
+                shot
+            } else {
+                None
+            };
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -10157,6 +10179,12 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             if let Some((buffer, footprint)) = capture {
                 crate::capture::save_read_back(frame, &buffer, &footprint);
+            }
+            // (Victory) The screenshot's copy has run (`execute` waits for it,
+            // as the frame is never sent ahead when one is taken): convert it
+            // and save it on a thread of its own.
+            if let Some(shot) = shot {
+                crate::screenshot::finish(shot);
             }
             #[cfg(feature = "diagnostics")]
             crate::replay::record::present(texture, state);
@@ -10263,6 +10291,8 @@ impl Host {
             let copy = self.new_list()?;
             copy.close();
             tracing::info!(width, height, format = format.0, "presenting to a window");
+            // (Victory) The F10 performance panel and F12 screenshots.
+            crate::overlay::start(hwnd, self.adapter.clone());
             self.log_video_memory("right after the swap chain is made");
             Ok(Presenter {
                 swap_chain,

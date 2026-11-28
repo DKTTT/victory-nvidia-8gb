@@ -1743,6 +1743,23 @@ pub(crate) fn shown_per_frame() -> u32 {
     FG_PER.load(Relaxed).max(1)
 }
 
+/// For the performance counter (F10 overlay and F12 screenshots): DLSS's mode (or "off") and
+/// frame generation's frames shown for each one rendered (or "off"/"ready").
+pub(crate) fn status() -> (&'static str, String) {
+    let plan = PLAN.get();
+    let dlss = match plan {
+        Some(plan) if plan.dlss => plan.asked.mode.name(),
+        _ => "off",
+    };
+    let framegen = plan.is_some_and(|plan| plan.framegen) || crate::fsr::selected();
+    let frames = match shown_per_frame() {
+        n if n > 1 => format!("{n}x"),
+        _ if framegen => "ready".into(),
+        _ => "off".into(),
+    };
+    (dlss, frames)
+}
+
 /// After our swap chain's Present: the frame's last marker, the next
 /// frame's first, and what frame generation reports.
 pub(crate) fn present_ends(presenting: Option<Presenting>) {
