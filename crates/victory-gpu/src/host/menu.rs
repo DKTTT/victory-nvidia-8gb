@@ -211,7 +211,7 @@ fn fps_line() -> Option<String> {
     } else {
         format!("FPS {fps:.1} x{per}   {shown:.1} shown   {:.1} ms", stats.ms)
     };
-    if let Some((low, high, avg)) = stats.half_minute {
+    if let Some((high, low, avg)) = stats.half_minute {
         out.push_str(&format!("   30s avg {avg:.1}  high {high:.1}  low {low:.1}"));
     }
     out.push_str(&format!("   draws {:.0}", stats.draws));
