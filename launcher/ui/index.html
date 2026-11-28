@@ -1,0 +1,220 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; font-src 'self' file:; base-uri 'none'; form-action 'none'">
+<title>GTA6 CN · Victory</title>
+<link rel="stylesheet" href="home.css?v=18">
+</head>
+<body class="booting">
+<svg class="sky" aria-hidden="true" preserveAspectRatio="xMidYMid slice" viewBox="0 0 1280 800">
+  <circle cx="160" cy="120" r="2" fill="#D9D1F6"/><circle cx="420" cy="70" r="1.5" fill="#D9D1F6"/><circle cx="80" cy="520" r="1.5" fill="#D9D1F6"/><circle cx="300" cy="700" r="2" fill="#D9D1F6"/>
+  <circle class="tw" cx="640" cy="160" r="1.4" fill="#D9D1F6"/><circle cx="860" cy="90" r="1.2" fill="#D9D1F6" fill-opacity=".7"/><circle class="tw d2" cx="1040" cy="210" r="1.6" fill="#D9D1F6"/>
+  <circle cx="540" cy="420" r="1.1" fill="#D9D1F6" fill-opacity=".6"/><circle class="tw d3" cx="740" cy="560" r="1.5" fill="#D9D1F6"/><circle cx="1220" cy="60" r="1.3" fill="#D9D1F6" fill-opacity=".8"/>
+</svg>
+
+<!-- window buttons: the page draws the title bar on Windows -->
+<div class="winbtns" id="winBtns" hidden>
+  <button data-win="min" aria-label="Minimize" title="Minimize"></button>
+  <button data-win="max" id="winMax" aria-label="Maximize" title="Maximize"></button>
+  <button data-win="close" class="close" aria-label="Close" title="Close"></button>
+</div>
+
+<!-- ================= HOME ================= -->
+<div class="shell" id="shell">
+  <nav class="rail" aria-label="Main">
+    <img class="logo" src="victory-icon.svg" width="60" height="60" alt="">
+    <div class="gap"></div>
+    <button class="rb on" data-view="home" aria-label="主页" title="主页"><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg></button>
+    <button class="rb" data-view="saves" aria-label="存档" title="存档"><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h8V3"/><path d="M8 21v-7h8v7"/></svg></button>
+    <button class="rb" data-view="controls" aria-label="Controls" title="Controls"><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10v5M4.5 12.5h5"/><circle cx="16" cy="11" r="1"/><circle cx="18.5" cy="13.5" r="1"/></svg></button>
+    <div class="grow"></div>
+    <button class="rb" id="openSettings" aria-label="设置" title="设置"><span class="alert" id="setAlert" hidden title="Set up needed">!</span><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  </nav>
+
+  <main class="main">
+    <header class="top drag">
+      <div class="wordmark">GTA6 CN <span class="vi">VICTORY</span></div>
+      <span class="pill" id="verPill"></span>
+      <span class="pill test" id="testTag" hidden>TEST PROFILE</span>
+    </header>
+
+    <div class="views">
+      <!-- home -->
+      <section class="view on" id="v-home">
+        <div class="col">
+          <div class="hero" id="hero">
+            <div class="bloom" aria-hidden="true"></div>
+            <img class="heroplanet" src="victory-icon.svg" alt="">
+            <svg class="heroart" aria-hidden="true" viewBox="0 0 820 330" preserveAspectRatio="xMidYMid slice">
+              <circle cx="120" cy="60" r="2" fill="#D9D1F6"/><circle cx="260" cy="34" r="1.5" fill="#D9D1F6"/><circle cx="420" cy="80" r="1.5" fill="#D9D1F6"/><circle cx="60" cy="190" r="1.5" fill="#D9D1F6"/>
+              <circle cx="520" cy="40" r="1.2" fill="#FEC497" fill-opacity=".8"/><circle cx="780" cy="30" r="1.4" fill="#D9D1F6"/>
+            </svg>
+            <div class="herobody">
+              <div class="eyerow"><div class="eyebrow" id="heroEye">准备就绪</div></div>
+              <h1><span class="pre">GTA6</span> CN <span class="vi">VICTORY</span> <span class="hver" id="heroVer"></span></h1>
+              <div class="herosub" id="heroSub"></div>
+              <div class="progress" id="warmBar" hidden><div class="bar"><i></i></div><span id="warmText">Preparing shaders…</span></div>
+              <div class="grow"></div>
+              <div class="heroacts">
+                <button class="play" id="playBtn"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l13 8-13 8z"/></svg><span>Play</span></button>
+                <label for="mode" class="sr">Mode</label>
+                <select id="mode">
+                  <option value="s">快速 · 720p 放大（Series S）</option>
+                  <option value="x">清晰 · 4K（Series X）</option>
+                </select>
+                <button class="ghostbtn" id="warmBtn">预热着色器</button>
+                <!-- (Neptune) DLSS on an NVIDIA RTX card: Get DLSS, then the frame generation choice -->
+                <button class="ghostbtn" id="dlssBtn" hidden>获取 DLSS</button>
+                <label for="dlssSel" class="sr">DLSS</label>
+                <select id="dlssSel" hidden></select>
+                <div class="setupcorner" id="setupCorner" hidden><span>需要设置</span><button class="setupbtn" id="setupBtn">去设置</button></div>
+              </div>
+              <div class="heronote" id="heroNote"></div>
+            </div>
+          </div>
+
+          <div class="cards">
+            <div class="card"><div class="k">上次游玩</div><div class="v" id="cSession">还没有</div><div class="s" id="cSessionS">点开始游戏</div></div>
+            <div class="card"><div class="k">着色器缓存</div><div class="v" id="cShaders">Cold</div><div class="s" id="cShadersS">Warm it once for a smooth first run</div></div>
+            <div class="card"><div class="k">你的电脑</div><div class="v" id="cPc">…</div><div class="s" id="cPcS"></div></div>
+          </div>
+
+          <div>
+            <div class="rowhead"><h2>存档</h2><button class="link" data-view="saves">Open save manager</button></div>
+            <div class="savetiles" id="saveTiles"></div>
+          </div>
+        </div>
+
+        <aside class="side">
+          <div class="card big">
+            <div class="eyebrow dim">CHECKS</div>
+            <div class="checks" id="checks"></div>
+          </div>
+          <div class="grow"></div>
+          <div class="fine">不含游戏文件；请使用你自己的游戏副本。不上传任何东西。</div>
+        </aside>
+      </section>
+
+      <!-- saves -->
+      <section class="view" id="v-saves">
+        <div class="col wide">
+          <div class="rowhead"><div><h2 class="big">存档</h2><div class="sub">Loading always backs up the save it replaces. Close the game before loading.</div></div>
+            <div class="acts"><button class="ghostbtn sm" id="importBtn">导入存档…</button><button class="ghostbtn sm" id="openFolder">Open folder</button></div></div>
+          <div class="card">
+            <div class="rowhead"><b>Your game</b><button class="link" id="chooseSaveFolder" hidden>选择存档目录…</button></div>
+            <p class="sub save-path" id="savePath" hidden></p>
+            <div id="svNow"></div>
+            <form class="sv-add" id="svForm">
+              <input id="svName" placeholder="Name this spot, e.g. boat" maxlength="60" autocomplete="off" spellcheck="false">
+              <button class="primary sm" type="submit">Keep current save</button>
+              <button class="ghostbtn sm" type="button" data-sv="fresh" title="Keeps your current save as a backup, then clears the story so the next run starts a new game.">Start a new game</button>
+            </form>
+            <div class="note" id="svNote" role="status"></div>
+          </div>
+          <div id="svList"></div>
+        </div>
+      </section>
+
+      <!-- controls -->
+      <section class="view" id="v-controls">
+        <div class="col wide">
+          <div><h2 class="big">操作</h2><div class="sub">Keyboard and mouse while the game runs. The window doesn't take focus on its own: click the picture first.</div></div>
+          <div class="keys">
+            <div class="key"><kbd>Click</kbd> or <kbd>F9</kbd><span>Mouse look on</span></div>
+            <div class="key"><kbd>F9</kbd> or <kbd>Alt+Tab</kbd><span>Let the pointer go</span></div>
+            <div class="key"><kbd>W A S D</kbd><span>Move</span></div>
+            <div class="key"><kbd>Mouse</kbd> or <kbd>I J K L</kbd><span>Look (right stick)</span></div>
+            <div class="key"><kbd>Right mouse</kbd> or <kbd>E</kbd><span>Left trigger (interact)</span></div>
+            <div class="key"><kbd>Left mouse</kbd> or <kbd>C</kbd><span>Right trigger</span></div>
+            <div class="key"><kbd>Shift</kbd> <kbd>Ctrl</kbd><span>Stick clicks (also F, H)</span></div>
+            <div class="key"><kbd>Space</kbd> <kbd>Backspace</kbd> <kbd>X</kbd> <kbd>Y</kbd><span>A, B, X, Y (Enter is A too, Tab is Y)</span></div>
+            <div class="key"><kbd>Q</kbd> <kbd>Z</kbd><span>Left / right bumper</span></div>
+            <div class="key"><kbd>Arrows</kbd><span>D-pad</span></div>
+            <div class="key"><kbd>Esc</kbd><span>Menu</span></div>
+            <div class="key"><kbd>V</kbd><span>View</span></div>
+            <div class="key"><kbd>F10</kbd><span>Hide the figures in the corner</span></div>
+            <div class="key"><kbd>F12</kbd><span>Save a picture</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<!-- ================= SETTINGS ================= -->
+<div class="settings" id="settings" aria-hidden="true">
+  <header class="top drag">
+    <button class="back" id="closeSettings" aria-label="Back to home"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <div class="wordmark sm">设置</div>
+    <div class="grow"></div>
+    <label for="q" class="sr">Search settings</label>
+    <input id="q" class="search" placeholder="搜索设置" spellcheck="false" autocomplete="off">
+  </header>
+  <div class="setbody">
+    <nav class="setnav" aria-label="Settings sections">
+      <button class="sn on" data-sec="general">通用</button>
+      <button class="sn" data-sec="graphics">画面</button>
+      <button class="sn" data-sec="performance">性能</button>
+      
+      <button class="sn" data-sec="saves">存档</button>
+      <button class="sn" data-sec="logs">日志与问题报告</button>
+    </nav>
+    <section class="setmain" id="setMain"></section>
+  </div>
+</div>
+
+<!-- ================= DLSS (Neptune): NVIDIA's files on the player's word, then the choice ================= -->
+<div class="dlg" id="dlssDlg" hidden>
+  <div class="dlgcard" role="dialog" aria-modal="true" aria-labelledby="dlssTitle">
+    <div class="wtitle" id="dlssTitle">NVIDIA RTX card detected</div>
+    <div class="sub" id="dlssText"></div>
+    <div id="dlssBody"></div>
+    <div class="dlgfoot" id="dlssFoot"></div>
+  </div>
+</div>
+
+<!-- ================= Play before the shaders are prepared (Neptune) ================= -->
+<div class="dlg" id="warmDlg" hidden>
+  <div class="dlgcard" role="dialog" aria-modal="true" aria-labelledby="warmDlgTitle">
+    <div class="wtitle" id="warmDlgTitle">这个版本还没有预热着色器</div>
+    <div class="sub" id="warmDlgText"></div>
+    <label class="dlgtick"><input type="checkbox" id="warmNoAsk"> Don’t ask again for this build</label>
+    <div class="dlgfoot">
+      <button class="ghostbtn plain" id="warmClose">取消</button>
+      <button class="ghostbtn" id="warmAnyway">仍要开始</button>
+      <button class="primary lg" id="warmPrep">现在预热</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= FIRST RUN ================= -->
+<div class="welcome" id="welcome" hidden>
+  <div class="wplanet wglow" aria-hidden="true"></div>
+  <div class="wcard drag-none" id="wcard">
+    <div class="whead">
+      <img src="victory-icon.svg" width="48" height="48" alt="">
+      <div><div class="wtitle">欢迎使用 GTA6 CN · Victory</div><div class="sub">三步设置，然后开始游戏。</div></div>
+    </div>
+    <ol class="steps" aria-label="Setup steps">
+      <li data-step="0" class="on"><b>1</b> · 你的游戏文件</li>
+      <li data-step="1"><b>2</b> · 检查电脑配置</li>
+      <li data-step="2"><b>3</b> · 预热着色器</li>
+    </ol>
+    <div class="wpages"><div class="wtrack" id="wtrack">
+      <div class="wpage" id="w0"></div>
+      <div class="wpage" id="w1"></div>
+      <div class="wpage" id="w2"></div>
+    </div></div>
+    <div class="wfoot">
+      <div class="fine grow">不上传任何东西，游戏文件只在你电脑上。</div>
+      <button class="ghostbtn plain" id="wSkip">跳过</button>
+      <button class="primary lg" id="wNext">继续</button>
+    </div>
+  </div>
+</div>
+
+<script src="home.js?v=17"></script>
+<script src="frame.js?v=2"></script>
+</body>
+</html>
