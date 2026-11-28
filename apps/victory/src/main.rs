@@ -1,7 +1,20 @@
-//! `victory`: the command-line front end.
+﻿//! `victory`: the command-line front end.
 //!
 //! Every command reads the user's own files and writes only to stdout or to
 //! the user's cache directory (outside the repository).
+
+// (Win10/Win11) the app-local Agility SDK runtime in D3D12\: its exports tell d3d12.dll to use that copy
+// instead of the inbox one (Windows 10's rejects the root-signature flags this project sets).
+#[unsafe(no_mangle)]
+pub static D3D12SDKVersion: u32 = 620;
+
+#[repr(transparent)]
+pub struct SdkPathPub(*const u8);
+// SAFETY: a plain `'static` byte-string pointer, read by the loader before `main`.
+unsafe impl Sync for SdkPathPub {}
+
+#[unsafe(no_mangle)]
+pub static D3D12SDKPath: SdkPathPub = SdkPathPub(b".\\D3D12\\\0".as_ptr());
 
 mod census;
 mod inspect;

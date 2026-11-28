@@ -43,7 +43,7 @@ if ($Bundle) {
 
     # 3. the package's FidelityFX DLLs and the script hook / trainer (dlssg-sm86 and nvidia-sdk stay optional
     #    drop-in folders: too big, and only for NVIDIA cards)
-    foreach ($name in 'amd-sdk', 'shvi') {
+    foreach ($name in 'amd-sdk', 'shvi', 'D3D12') {
         $source = Join-Path $Bundle $name
         if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "$name not found in the package folder: $Bundle" }
         Copy-Item -LiteralPath $source -Destination (Join-Path $payloadDir $name) -Recurse
