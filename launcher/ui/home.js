@@ -435,6 +435,7 @@ const SECTIONS = {
       '<div class="acts"><button class="mini" data-act="doc" data-key="tutorial">教程</button><button class="mini" data-act="doc" data-key="readme">启动器说明</button><button class="mini" data-act="doc" data-key="trainer">修改器</button></div>'),
       row('键盘和鼠标', '没有连接手柄时，用 WASD+鼠标当手柄玩（C/E=扳机）；关闭则只能用手柄', tog('keyboard', st('keyboard', true), '键盘和鼠标')),
       row('按键提示图标', '把游戏的按手键提示换成键盘图标（从你的游戏文件自动生成，或放 mods\\input_icons_kbm.gfx）', tog('keyIcons', st('keyIcons', true), '按键提示图标')),
+      row('重置 F1 菜单设置', '清掉游戏内 F1 菜单保存的旧设置（症状：点开始没反应/黑屏后退出；设置由启动器接管，一般不用动）', '<button class="mini" data-act="resetF1">重置</button>'),
       row('带修改器启动', '进游戏后按 F4 打开单机修改器（SHVI / trainer.asi）；不勾选则正常启动', tog('trainer', st('trainer', false), '带修改器启动')),
   ]],
   graphics: () => ['画面', '更改将在下次开始游戏时生效。', [
@@ -622,6 +623,7 @@ document.addEventListener('click', (e) => {
     case 'saves': closeSettings(); return show('saves');
     case 'saveFolder': return send({ cmd: 'openFolder' });
     case 'welcome': closeSettings(); return welcome(true);
+    case 'resetF1': return send({ cmd: 'launch.resetF1' });
   }
   if (t.closest('#wNext')) { if (step < 2) { step++; return renderWelcome(); } return finishWelcome(); }
   if (t.closest('#wSkip')) return finishWelcome();

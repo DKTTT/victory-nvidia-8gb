@@ -154,6 +154,16 @@ sealed class Launch
             case "set":
                 foreach (var kv in m["values"]!.AsObject()) settings[kv.Key] = kv.Value?.DeepClone();
                 Save(); SendSettings(); break;
+            case "resetF1":
+                try
+                {
+                    var f1 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "victory-settings.txt");
+                    if (File.Exists(f1)) File.Delete(f1);
+                    if (File.Exists(f1 + ".bak")) File.Delete(f1 + ".bak");
+                    app.Out("\nF1 菜单设置已重置（下次启动生效）\n", "ok");
+                }
+                catch (Exception e) { app.Out("\n重置 F1 设置失败：" + e.Message + "\n", "bad"); }
+                SendSettings(); break;
             case "pickGame":
                 if (app.Host.PickFile("你的游戏：game_scarlett_master.exe", "game_scarlett_master.exe", "游戏（game_scarlett_master.exe）") is string g) Set("game", g);
                 SendSettings(); break;
@@ -331,6 +341,21 @@ sealed class Launch
                     app.Out("\n自上次预热后设置已更改：着色器可能在游玩时转译（卡顿、CPU 占用 100%）。请使用当前设置重新预热。\n", "bad");
             }
 
+        // (Victory) the in-game F1 menu file overrides `play`; a stale choice (e.g. 3X frame generation without
+        // DLSS) makes the title fail at its first upscaling and exit with code 0, which looks like nothing happened.
+        // The launcher owns the settings: back the old file up and run without it.
+        try
+        {
+            var f1 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "victory-settings.txt");
+            if (File.Exists(f1))
+            {
+                File.Copy(f1, f1 + ".bak", true);
+                File.Delete(f1);
+                app.Out("\n旧的 F1 菜单设置已备份为 victory-settings.txt.bak 并忽略（由启动器管理设置）\n", "h");
+            }
+        }
+        catch { }
+
         var args = new List<string> { "play", WinPath(Path.GetFullPath(gamePath)) };
         args.AddRange(console);
         var fgFrames = FrameGen();
@@ -369,6 +394,9 @@ sealed class Launch
             AddRun(id, started, code, stopping);
             stopping = false;
             app.Out($"\n--- 游戏已结束（代码 {code}）；日志：{logPath} ---\n", code == 0 ? "ok" : "bad");
+            var seconds = (DateTime.Now - started).TotalSeconds;
+            if (seconds < 30)
+                app.Out($"\n没看到游戏窗口就退出了（{seconds:F0} 秒）：多半是旧 F1 设置/放大失败。已自动忽略旧 F1 设置，请再点一次开始；仍不行就换「清晰 · 4K」或关掉帧生成。日志：{logPath}\n", "bad");
             app.Post(new JsonObject { ["type"] = "game", ["state"] = "end", ["id"] = id, ["code"] = code });
             SendSettings();
         };
