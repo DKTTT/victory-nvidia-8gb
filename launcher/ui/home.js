@@ -164,7 +164,8 @@ function checksList() {
     if (PC.gpu && /Intel|UHD|Iris|Vega|Basic Render/i.test(PC.gpu)) L.push(['显卡', [`${PC.gpu} · 可能是核显`, 'bad']]);
   if (PC.vram) L.push(['显存', PC.vram >= 15e9 ? [gb(PC.vram), 'ok'] : [`${gb(PC.vram)} · ${saverOn() ? '省显存开' : '建议开省显存'}`, saverOn() ? 'ok' : 'warn']]);
     if (PC.ram) L.push(['可用内存', PC.ramFree >= 16e9 ? [`${gb(PC.ramFree)} 可用`, 'ok'] : [`需要 16 GB · ${gb(PC.ramFree)} 可用`, 'warn']]);
-    if (PC.disk >= 0) L.push(['磁盘空间', PC.disk >= 10e9 ? ['充足', 'ok'] : [`${gb(PC.disk)} 可用`, 'warn']]);
+    if (PC.os) L.push(['系统', PC.os]);
+        if (PC.disk >= 0) L.push(['磁盘空间', PC.disk >= 10e9 ? ['充足', 'ok'] : [`${gb(PC.disk)} 可用`, 'warn']]);
   }
   return L;
 }
@@ -289,6 +290,19 @@ function nvidiaRows() {
     row('或使用你自己的文件夹', '已包含 NVIDIA Streamline DLL 的文件夹（sl.interposer.dll 等）；每个文件都必须由 NVIDIA 签名',
       `<div class="acts"><button class="mini" data-pickdir="streamlineDir" data-title="包含 NVIDIA Streamline DLL 的文件夹">选择…</button>${st('streamlineDir', '') ? '<button class="mini ghost" data-clear="streamlineDir">清除</button>' : ''}</div>`,
       pathCode('streamlineDir')),
+  ];
+}
+
+// (Victory) AMD/Intel cards: FSR frame generation is vendor-neutral; DLSS needs NVIDIA.
+function fsrRows() {
+  const fg = +st('framegen', 0);
+  const opts = [[0, '关闭'], [1, '2x']];
+  const seg = `<div class="seg" role="radiogroup" aria-label="帧生成">${opts.map(([n, l]) =>
+    `<button data-fg="${n}" class="${fg === n ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const card = esc(PC?.gpu || 'AMD/Intel 显卡');
+  return [
+    row('帧生成（AMD FSR）', `FSR 帧生成跨厂商可用：在 ${card} 上开启 2 倍插帧（不需要 NVIDIA 文件）。`, seg),
+    row('NVIDIA DLSS', '未检测到 NVIDIA RTX 显卡：DLSS 超分与 DLSS 帧生成不可用；AMD/Intel 使用上面的 FSR。', '<span class="mini ghost">不可用</span>'),
   ];
 }
 
@@ -447,7 +461,7 @@ const SECTIONS = {
       : '你自己的 PC 版 <code>amd_fidelityfx_upscaler_dx12.dll</code>：游戏自带超分依赖它。没有它，游戏自带超分将无法启用。',
       `<div class="acts"><button class="mini" data-pickfile="fsrDll">选择…</button>${st('fsrDll', '') ? '<button class="mini ghost" data-clear="fsrDll">清除</button>' : ''}</div>`,
       pathCode('fsrDll') + (st('fsrDll', '') && S.fsrOk === false ? '<small class="bad">该文件已不存在。</small>' : '')),
-    ...(A.os === 'windows' && PC?.rtx >= 20 ? nvidiaRows() : []),
+    ...(A.os === 'windows' && PC?.rtx >= 20 ? nvidiaRows() : A.os === 'windows' && PC ? fsrRows() : []),
   ]],
   performance: () => ['性能', '每次运行时的相关设置。', [
     row('额外绘制线程', '把游戏的绘制任务分摊到更多 CPU 核心（推荐）', tog('thin', st('thin', true), '额外绘制线程')),

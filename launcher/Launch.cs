@@ -82,6 +82,7 @@ sealed class Launch
             ["filesOk"] = ReleaseDir() != null, ["bundled"] = BundledRelease,
             ["fsrOk"] = S("fsrDll").Length == 0 || File.Exists(S("fsrDll")),
             ["dlssOn"] = B("dlss", false) && Rtx() >= 20,
+            ["vendor"] = Vendor(), ["gpuName"] = GpuName(), ["os"] = Environment.OSVersion.VersionString,
             ["sl"] = SlStatus(),
             ["history"] = HistoryCopy(),
             // (Neptune) cold, failed, build, flags or warm, and the key it was judged by
@@ -97,6 +98,23 @@ sealed class Launch
         string gpu = "", driver = ""; long vram = 0;
         try { Gpu(ref gpu, ref driver, ref vram); } catch { }
         return rtx = Streamline.RtxGeneration(gpu);
+    }
+    string? gpuNameCached;
+    string GpuName()
+    {
+        if (gpuNameCached != null) return gpuNameCached;
+        string gpu = "", driver = ""; long vram = 0;
+        try { Gpu(ref gpu, ref driver, ref vram); } catch { }
+        return gpuNameCached = gpu ?? "";
+    }
+    string? vendorCached;
+    string Vendor()
+    {
+        if (vendorCached != null) return vendorCached;
+        var n = GpuName().ToUpperInvariant();
+        return vendorCached = n.Contains("NVIDIA") || n.Contains("GEFORCE") || n.Contains("RTX") ? "nvidia"
+            : n.Contains("AMD") || n.Contains("RADEON") ? "amd"
+            : n.Contains("INTEL") ? "intel" : "other";
     }
     // frames generated between two of the title's: 0 (off), 1 (2x), 2 (3x), 3 (4x), 5 (6x)
     int FrameGen() => settings["framegen"] is JsonValue v && v.TryGetValue<int>(out var n) && n is >= 0 and <= 5 ? n : 0;
@@ -378,11 +396,31 @@ sealed class Launch
         args.AddRange(console);
         var fgFrames = FrameGen();
         var dlssOn = B("dlss", false);
+        var vendor = Vendor();
+        var nvidia = vendor == "nvidia" || Rtx() >= 20;
+        if (dlssOn && !nvidia) { dlssOn = false; notes.Add("未检测到 NVIDIA 显卡：DLSS 已关闭（AMD/Intel 用 FSR）"); }
         if (dlssOn) { args.AddRange(["--dlss", S("dlssMode", "quality")]); env["VICTORY_DLSS"] = "1"; }
         if (fgFrames > 0)
         {
-            args.AddRange(["--framegen", (fgFrames + 1).ToString()]);
-            if (dlssOn) args.AddRange(["--fg-type", "dlss"]);
+            if (nvidia)
+            {
+                args.AddRange(["--framegen", (fgFrames + 1).ToString()]);
+                if (dlssOn) args.AddRange(["--fg-type", "dlss"]);
+            }
+            else if (vendor is "amd" or "intel")
+            {
+                // FSR frame generation is vendor-neutral; the shipped amd-sdk has the FSR DLLs
+                args.AddRange(["--framegen", "2"]);
+                args.AddRange(["--fg-type", "fsr"]);
+                env["VICTORY_FRAMEGEN"] = "1";
+                env["VICTORY_FRAMEGEN_X"] = "2";
+                env["VICTORY_FRAMEGEN_BACKEND"] = "fsr";
+                if (!env.ContainsKey("VICTORY_FSR_DIR") && Directory.Exists(Path.Combine(exeDir!, "amd-sdk")))
+                    env["VICTORY_FSR_DIR"] = WinPath(Path.Combine(exeDir!, "amd-sdk"));
+                notes.Add("使用 AMD FSR 帧生成：2x（检测到 " + GpuName() + "）");
+                if (fgFrames > 1) notes.Add("AMD/Intel 上帧生成最高 2 倍：已按 2x 开启");
+            }
+            else notes.Add("帧生成需要 NVIDIA（DLSS）或 AMD/Intel（FSR）显卡：已关闭");
         }
         // `play` clears the VICTORY_* it inherits: the switches go in with --set
         foreach (var kv in env) args.AddRange(["--set", kv.Key + "=" + kv.Value]);

@@ -1,5 +1,6 @@
 ﻿// GTA6 CN Victory launcher, adapted (GPL-3.0) from the Project Neptune VI launcher. The save manager below comes from VI Save Manager.
 using System.Diagnostics;
+using Microsoft.Win32;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
@@ -11,6 +12,23 @@ namespace Neptune;
 
 static class Program
 {
+    // Win10 ships without the Evergreen runtime; Win11 usually has it. Check before WebView2 is created.
+    static bool WebView2RuntimePresent()
+    {
+        var id = @"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+        foreach (var (root, path) in new[]
+        {
+            (Registry.LocalMachine, @"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\" + id),
+            (Registry.LocalMachine, @"SOFTWARE\Microsoft\EdgeUpdate\Clients\" + id),
+            (Registry.CurrentUser, @"Software\Microsoft\EdgeUpdate\Clients\" + id),
+        })
+        {
+            using var k = root.OpenSubKey(path);
+            if (k?.GetValue("pv") is string pv && pv.Length > 0 && pv != "0.0.0.0") return true;
+        }
+        return false;
+    }
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -30,6 +48,13 @@ static class Program
         // a -Bundle build unpacks its release before the window opens (the first start after a build only)
         Payload.Prepare();
 #if WINDOWS
+        if (!WebView2RuntimePresent())
+        {
+            MessageBox.Show("未检测到 Microsoft Edge WebView2 运行时，启动器界面无法显示。\n\n请下载并安装 WebView2（Windows 10/11 通用），装好后重新打开启动器：\nhttps://go.microsoft.com/fwlink/p/?LinkId=2124703\n\n（Win11 通常自带；Win10 可能需要手动安装一次）",
+                "GTA6 CN · Victory", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            try { Process.Start(new ProcessStartInfo { FileName = "https://go.microsoft.com/fwlink/p/?LinkId=2124703", UseShellExecute = true }); } catch { }
+            return 1;
+        }
         ApplicationConfiguration.Initialize();
         Application.Run(new WindowsHost(test));
         return 0;
