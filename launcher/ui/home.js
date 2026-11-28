@@ -131,11 +131,19 @@ function renderHome() {
   $('#hero').classList.toggle('needsetup', setup && !running && !job);
   // (Victory) 启动中面板：灰色开始键 + 已等待秒数 + 当前步骤（窗口出现前 CPU 100% 属正常）
   const sp = $('#startPanel');
+  const sw = $('#startWrap');
+  if (sw) sw.hidden = !starting;
   if (sp) {
     sp.hidden = !starting;
     if (starting) {
       $('#startTitle').textContent = STARTING.step || '正在启动游戏…';
       $('#startText').textContent = STARTING.detail || `已等待 ${Math.round((Date.now() - STARTING.t) / 1000)} 秒`;
+      const stages = ['启动内核', '加载/翻译着色器', '打开游戏窗口'];
+      const st = Math.max(0, Math.min(2, STARTING.stage | 0));
+      $('#startSteps').innerHTML = stages.map((name, i) => `<span class="${i < st ? 'done' : i === st ? 'now' : ''}">${i < st ? '✓ ' : ''}${name}</span>`).join('');
+      const log = $('#startLog');
+      log.textContent = (STARTING.lines || []).join('\n');
+      log.scrollTop = log.scrollHeight;
     }
   }
   navBadges();
@@ -399,7 +407,7 @@ const play = () => send({ cmd: 'launch.run', id: ID, overrides: st('ov:' + ID, {
 // (Victory) 启动中的状态：立刻灰掉开始键，避免连点；窗口出现或进程结束后结束
 function beginStart() {
   if (STARTING) return;
-  STARTING = { t: Date.now(), step: '正在启动内核进程…', detail: '' };
+  STARTING = { t: Date.now(), step: '正在启动内核进程…', detail: '', stage: 0, lines: [] };
   if (!START_TICK) START_TICK = setInterval(() => { if (STARTING) renderHome(); }, 1000);
   renderHome();
 }
@@ -773,9 +781,17 @@ window.vismReceive = (m) => {
       if (STARTING) {
         const txt = String(m.text || '');
         if (txt.includes('游戏窗口已出现')) { endStart(); break; }
+        STARTING.stage = 1;
         const mm = /已等待\s*(\d+)\s*秒/.exec(txt);
-        if (mm) { STARTING.step = '正在加载游戏…'; STARTING.detail = `已等待 ${mm[1]} 秒（首次需翻译着色器，窗口出现前 CPU 占用高属正常）`; renderHome(); break; }
-        if (txt.includes('启动中')) { STARTING.step = '正在启动游戏…'; renderHome(); break; }
+        if (mm) STARTING.detail = `已等待 ${mm[1]} 秒（首次需翻译着色器，窗口出现前 CPU 占用高属正常）`;
+        for (const raw of txt.split(/\r?\n/)) {
+          const line = raw.trim();
+          if (!line || line.startsWith('===') || /pipeline creation method|draw calls translated|^launcher: VICTORY_/.test(line)) continue;
+          STARTING.lines.push(line.startsWith('launcher: ') ? line.slice(9) : line);
+          if (STARTING.lines.length > 8) STARTING.lines.shift();
+        }
+        renderHome();
+        break;
       }
       // (Victory) the warm-up's lines (apps/victory/src/warm.rs): its first line
       // "<known> pipelines known, <n> made before (<fingerprint>), <n> bad; <to make> to make, <n> processes",

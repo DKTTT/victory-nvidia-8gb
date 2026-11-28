@@ -70,12 +70,19 @@
                 <select id="dlssSel" hidden></select>
                 <div class="setupcorner" id="setupCorner" hidden><span>需要设置</span><button class="setupbtn" id="setupBtn">去设置</button></div>
               </div>
-              <div class="startpanel" id="startPanel" hidden>
-                <div class="spin" aria-hidden="true"></div>
-                <div class="starttext"><b id="startTitle">正在启动游戏…</b><small id="startText">已等待 0 秒</small></div>
-                <button class="ghostbtn" id="startCancel" style="height:40px">取消启动</button>
+                <div class="heronote" id="heroNote"></div>
+            </div>
+          </div>
+
+          <div class="startwrap" id="startWrap" hidden>
+            <div class="startpanel" id="startPanel" hidden>
+              <div class="spin" aria-hidden="true"></div>
+              <div class="starttext">
+                <div class="starthead"><b id="startTitle">正在启动游戏…</b><small id="startText">已等待 0 秒</small></div>
+                <div class="startsteps" id="startSteps"></div>
+                <div class="startlog" id="startLog" aria-live="polite"></div>
               </div>
-              <div class="heronote" id="heroNote"></div>
+              <button class="ghostbtn" id="startCancel" style="height:40px">取消启动</button>
             </div>
           </div>
 
