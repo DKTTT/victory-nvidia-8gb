@@ -1,4 +1,4 @@
-//! (Victory) A performance overlay: a small rounded, translucent panel (per-pixel alpha through
+﻿//! (Victory) A performance overlay: a small rounded, translucent panel (per-pixel alpha through
 //! `UpdateLayeredWindow`) in a click-through, topmost tool window at the game window's client-area
 //! top-left, on a thread of its own, refreshed twice a second. The panel is drawn by [`render`],
 //! which F12 screenshots ([`crate::screenshot`]) reuse to put the same panel into the saved
@@ -99,7 +99,9 @@ fn frame_figures() -> (f64, f64) {
 /// Starts the overlay thread for the game window `hwnd` (the first call only).
 pub(crate) fn start(hwnd: windows::Win32::Foundation::HWND, adapter: Option<IDXGIAdapter3>) {
     static ONCE: Once = Once::new();
-    if !crate::switch::on("VICTORY_OVERLAY") {
+    // (Victory) on by default, `VICTORY_OVERLAY=0` turns it off: `switch::on` wants the variable set, which
+    // made the overlay never start with the variable unset (found in the live test: F10/F12 did nothing).
+    if std::env::var_os("VICTORY_OVERLAY").is_some_and(|v| v == "0") {
         return;
     }
     let game = hwnd.0 as usize;
