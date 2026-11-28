@@ -160,7 +160,8 @@ function checksList() {
   L.push(['游戏文件', S.gameOk ? ['已找到', 'ok'] : ['未设置', 'bad']]);
   L.push(['启动器文件', S.filesOk ? ['已找到', 'ok'] : ['缺少', 'bad']]);
   if (PC) {
-    if (PC.vram) L.push(['显存', PC.vram >= 15e9 ? [gb(PC.vram), 'ok'] : [`${gb(PC.vram)} · ${saverOn() ? '省显存开' : '建议开省显存'}`, saverOn() ? 'ok' : 'warn']]);
+    if (PC.gpu && /Intel|UHD|Iris|Vega|Basic Render/i.test(PC.gpu)) L.push(['显卡', [`${PC.gpu} · 可能是核显`, 'bad']]);
+  if (PC.vram) L.push(['显存', PC.vram >= 15e9 ? [gb(PC.vram), 'ok'] : [`${gb(PC.vram)} · ${saverOn() ? '省显存开' : '建议开省显存'}`, saverOn() ? 'ok' : 'warn']]);
     if (PC.ram) L.push(['可用内存', PC.ramFree >= 16e9 ? [`${gb(PC.ramFree)} 可用`, 'ok'] : [`16 GB needed · ${gb(PC.ramFree)} 可用`, 'warn']]);
     if (PC.disk >= 0) L.push(['Disk space', PC.disk >= 10e9 ? ['OK', 'ok'] : [`${gb(PC.disk)} free`, 'warn']]);
   }

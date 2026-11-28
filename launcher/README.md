@@ -30,3 +30,12 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 ## 测试钩子
 
 `VICTORY_LAUNCHER_E2E=<javascript>`：页面加载后执行一段 JS（无人值守测试用，平时不用设）。
+
+
+【排错：只看到人物的眼睛和嘴、其他全没】
+这是 Mesh Shader 没跑起来——最常见原因是 Windows 把游戏分给了核显（笔记本双显卡常见）。
+处理：
+1) Windows 设置 → 系统 → 屏幕 → 显示卡 → 把 game_scarlett_master.exe 和 victory.exe 设为「高性能」；
+2) 或 NVIDIA 控制面板 → 管理 3D 设置 → 程序设置 → 选 victory.exe → 首选图形处理器 = 高性能 NVIDIA 处理器；
+3) AMD 显卡在驱动里同样指定「高性能」。
+注意：GTX 10xx / RX 5000 及更老显卡没有 Mesh Shader，本层不支持。
