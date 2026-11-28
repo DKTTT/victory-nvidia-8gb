@@ -1016,6 +1016,20 @@ sealed class Launch
         // 内存保险：不够就少开进程，并把原因写进输出
         var (jobs, ramNote) = GuardJobs(tier.Jobs);
         if (ramNote != null) app.Out("\n" + ramNote + "\n", "bad");
+        // (Victory) translate the whole shader corpus first (the Win10 notes measured 25,748 shaders in ~4 min):
+        // it makes the first run use the cache instead of translating while playing. `shaders` skips what is cached.
+        var gameDir = Path.GetDirectoryName(Path.GetFullPath(S("game")));
+        var rpf = gameDir == null ? null : Path.Combine(gameDir, "shaders.rpf");
+        var bvh = gameDir == null ? null : Path.Combine(gameDir, "XboxBvhBuilder.dll");
+        var upscaler = gameDir == null ? null : Path.Combine(gameDir, "amd_fidelityfx_upscaler_xbox.dll");
+        if (rpf != null && bvh != null && upscaler != null &&
+            File.Exists(rpf) && File.Exists(bvh) && File.Exists(upscaler))
+        {
+            var (sf, sall) = Wrap(exe, ["shaders", rpf, bvh, upscaler]);
+            var senv = Env(id, exeDir!, play, null, [], say: false);
+            senv["VICTORY_LOG"] = "warn";
+            Queue($"{label}：翻译全部着色器（shaders.rpf，约 2–4 分钟）", sf, sall, exeDir!, senv, low: true);
+        }
         var (file, all) = Wrap(exe, ["warm", "--jobs", jobs.ToString()]);
         // the same switches the run will have, so the run finds what this makes;
         // VICTORY_LOG=warn: only its progress ("120 s  2000 shaders") and the summary, not a line per shader

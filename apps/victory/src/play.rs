@@ -1,4 +1,4 @@
-//! `victory play`, and `victory` started with no command at all (a double
+﻿//! `victory play`, and `victory` started with no command at all (a double
 //! click): the title with the settings this fork plays with, so that the
 //! program alone, put beside the title's `game_scarlett_master.exe`, is all
 //! there is to start. What `scripts\play-foxhound.ps1` does, built in.
@@ -493,6 +493,24 @@ pub(crate) fn prepare(o: &Play) -> Result<Ready> {
     if let Some(dir) = &fsr {
         let dir = dir.to_string_lossy().replace('\'', "''");
         restart.push_str(&format!(" --set \"VICTORY_FSR_DIR={dir}\""));
+    }
+    // (Victory) the launcher's own switches must survive the F1 menu's "save and restart": that restart is a plain
+    // `play`, so without this the trainer (VICTORY_LOAD_DLLS), prompt icons (VICTORY_REPLACE_STREAMS), keyboard,
+    // the cache/data roots and the Streamline folder are lost and F4/trainer no longer opens after an F1 save.
+    for key in [
+        "VICTORY_LOAD_DLLS",
+        "VICTORY_REPLACE_STREAMS",
+        "VICTORY_KEYBOARD",
+        "VICTORY_CACHE_DIR",
+        "VICTORY_DATA_DIR",
+        "VICTORY_STREAMLINE_DIR",
+        "VICTORY_FSR_DIR",
+        "VICTORY_DLSSG_SM86_DIR",
+    ] {
+        if let Some(v) = s.get(key).filter(|v| !v.is_empty()) {
+            let v = v.replace('\'', "''");
+            restart.push_str(&format!(" --set \"{key}={v}\""));
+        }
     }
     s.insert("VICTORY_MENU_FILE".to_owned(), menu_file.to_string_lossy().into_owned());
     s.insert("VICTORY_MENU_PLAY".to_owned(), program.to_string_lossy().into_owned());

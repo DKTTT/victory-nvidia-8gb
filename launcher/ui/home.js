@@ -33,7 +33,7 @@ let JOB_TICK = null;
 // (Victory) a Play is starting: { t, step, detail } — disables the button and shows where it is
 let STARTING = null;
 let START_TICK = null;
-const freshWarm = () => ({ count: 0, secs: 0, total: null, samples: [] });
+const freshWarm = () => ({ count: 0, secs: 0, total: null, samples: [], shader: false });
 let warm = freshWarm();                 // the warm-up's progress, from its output (total: "to make", null before it says)
 
 // (Victory) the warm-up's progress, worked out once for every place that shows it
@@ -137,7 +137,9 @@ function renderHome() {
     const stage = String(job || '').replace(/^.*?预热着色器/, '').replace(/[（）()]/g, '').trim();
     $('#warmMeta').textContent = (has
       ? `${num(warm.count || 0)} / ${num(warm.total)} 条管线 · 已运行 ${elapsed} 分钟${left ? ' · 预计剩余 ' + left : ''}`
-      : `正在启动预热进程… · 已运行 ${elapsed} 分钟`) + (stage ? ` · ${stage}` : '');
+      : warm.shader
+        ? `已翻译 ${num(warm.count || 0)} 个着色器 · 已运行 ${elapsed} 分钟`
+        : `正在启动预热进程… · 已运行 ${elapsed} 分钟`) + (stage ? ` · ${stage}` : '');
     $('#warmHint').textContent = (has && (warm.count || 0) === 0 && elapsed >= 3)
       ? '首批编译最慢，属正常；如果长时间停在 0%，可取消后提取日志发作者'
       : (elapsed >= 20 ? '预热期间请勿关闭启动器；可随时取消，已完成的会保留' : '');
@@ -828,6 +830,11 @@ window.vismReceive = (m) => {
       // progress "<made> of <to make>, <seconds> s" (every two seconds), and "<made> made in <seconds> s (...)"
       if (!job) break;
       let changed = false;
+      // (Victory) the corpus pass: "8000 shaders in the cache, 12 s"
+      for (const p of m.text.matchAll(/^\s*(\d+) shaders in the cache, (\d+) s\s*$/gm)) {
+        warm.count = +p[1]; warm.total = null; warm.shader = true; warm.secs = +p[2];
+        changed = true;
+      }
       const head = /(\d+) pipelines known, (\d+) made before \([^)]*\), (\d+) bad; (\d+) to make, (\d+) processes/.exec(m.text);
       if (head) { warm.total = +head[4]; changed = true; }
       for (const p of m.text.matchAll(/^\s*(\d+) of (\d+), (\d+) s\s*$/gm)) {
