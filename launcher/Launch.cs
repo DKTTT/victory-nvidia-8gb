@@ -1,4 +1,4 @@
-// Running Neptune: its tuned switch set ([`Preset`]), Series S with the title's own upscaler or
+﻿// Running Neptune: its tuned switch set ([`Preset`]), Series S with the title's own upscaler or
 // Series X, auto-A; the PC's paths from Settings.
 using System.Diagnostics;
 using System.Text;
@@ -416,6 +416,48 @@ sealed class Launch
                 if (val.Length == 0) env.Remove(kv.Key); else env[kv.Key] = val;
             }
         if (!B("thin", true)) env.Remove("VICTORY_THIN");
+        // (Victory) the bundled script hook + trainer: F4 in game
+        if (B("trainer", false) && exeDir.Length > 0)
+        {
+            var shvi = Path.Combine(exeDir, "shvi", "shvi_core.dll");
+            if (File.Exists(shvi)) env["VICTORY_LOAD_DLLS"] = WinPath(shvi);
+            else notes?.Add("the trainer (shvi\\shvi_core.dll) is missing: started without it");
+        }
+        // (Victory) keyboard and mouse (on by default, as the reference): off = controller only
+        if (!B("keyboard", true)) env["VICTORY_KEYBOARD"] = "0";
+        // (Victory) keyboard prompt icons: a .gfx of the player's, or one made from their own data.rpf,
+        // replacing the title's controller prompts through VICTORY_REPLACE_STREAMS.
+        if (B("keyIcons", true) && !env.ContainsKey("VICTORY_REPLACE_STREAMS"))
+        {
+            try
+            {
+                var game = S("game");
+                string? icons = null;
+                var from = "your own file";
+                var own = S("keyIconsFile");
+                if (own.Length > 0 && File.Exists(own)) icons = own;
+                if (icons == null)
+                {
+                    foreach (var d in new[] { exeDir, Bundled, Path.GetDirectoryName(game) ?? "" })
+                    {
+                        if (d.Length == 0) continue;
+                        var f = Path.Combine(d, "mods", "input_icons_kbm.gfx");
+                        if (File.Exists(f)) { icons = f; from = "the mods folder"; break; }
+                    }
+                }
+                if (icons == null && game.Length > 0 && File.Exists(game))
+                {
+                    icons = KeyIcons.Ensure(Path.GetDirectoryName(Path.GetFullPath(game))!, notes);
+                    from = "your game files";
+                }
+                if (icons != null && File.Exists(icons))
+                {
+                    env["VICTORY_REPLACE_STREAMS"] = "data.rpf@293433344=" + WinPath(Path.GetFullPath(icons));
+                    notes?.Add($"keyboard prompt icons: {icons} ({from})");
+                }
+            }
+            catch (Exception e) { notes?.Add("keyboard prompt icons: skipped (" + e.Message + ")"); }
+        }
         return env;
     }
     public int WarmJobs()

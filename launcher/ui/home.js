@@ -1,4 +1,4 @@
-// GTA6 CN · Victory, the player's launcher. Talks to the host (App.cs) with web messages:
+﻿// GTA6 CN · Victory, the player's launcher. Talks to the host (App.cs) with web messages:
 // launch.* (run, warm, settings, PC checks), win.* (the window's buttons), the rest go to the save manager.
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -430,6 +430,9 @@ const SECTIONS = {
     // (Victory) the docs shipped with the release: opened from the package folder or the single exe's payload
     row('教程与说明', '从零开始教程、启动器说明与修改器说明（随发行包提供）',
       '<div class="acts"><button class="mini" data-act="doc" data-key="tutorial">教程</button><button class="mini" data-act="doc" data-key="readme">启动器说明</button><button class="mini" data-act="doc" data-key="trainer">修改器</button></div>'),
+      row('键盘和鼠标', '没有连接手柄时，用 WASD+鼠标当手柄玩（C/E=扳机）；关闭则只能用手柄', tog('keyboard', st('keyboard', true), '键盘和鼠标')),
+      row('按键提示图标', '把游戏的按手键提示换成键盘图标（从你的游戏文件自动生成，或放 mods\\input_icons_kbm.gfx）', tog('keyIcons', st('keyIcons', true), '按键提示图标')),
+      row('带修改器启动', '进游戏后按 F4 打开单机修改器（SHVI / trainer.asi）；不勾选则正常启动', tog('trainer', st('trainer', false), '带修改器启动')),
   ]],
   graphics: () => ['画面', '更改将在下次开始游戏时生效。', [
     row('模式', '快速：Series S，使用游戏自带分辨率和超分。清晰：Series X，速度较慢。',
