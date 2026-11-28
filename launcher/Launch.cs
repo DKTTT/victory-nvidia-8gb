@@ -545,7 +545,26 @@ sealed class Launch
             SendSettings();
         };
         game = p; gameId = id; stopping = false;
+        System.Threading.Timer? waitTimer = null;
         p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
+        // (Victory) a cold start translates shaders before the window shows; keep saying so, so it does not look stuck
+        waitTimer = new System.Threading.Timer(_ =>
+        {
+            try
+            {
+                if (game == null || game.Id != p.Id) { waitTimer?.Dispose(); return; }
+                p.Refresh();
+                if (p.HasExited) { waitTimer?.Dispose(); return; }
+                if (p.MainWindowTitle.Length > 0)
+                {
+                    app.Out("游戏窗口已出现。\n", "ok");
+                    waitTimer?.Dispose();
+                    return;
+                }
+                app.Out($"启动中… 已等待 {Math.Round((DateTime.Now - started).TotalSeconds)} 秒：窗口出现前 CPU 占满、画面未出属正常（首次要翻译着色器），请勿重复点开始。\n", "h");
+            }
+            catch { waitTimer?.Dispose(); }
+        }, null, 5000, 5000);
         app.Out($"\n=== {label}：运行中 ===\n", "h");
         app.Post(new JsonObject { ["type"] = "game", ["state"] = "start", ["id"] = id });
         SendSettings();
@@ -888,7 +907,7 @@ sealed class Launch
         // VICTORY_LOG=warn: only its progress ("120 s  2000 shaders") and the summary, not a line per shader
         var env = Env(id, exeDir!, play, null, [], say: false);
         var warmKey = WarmKey(env, exe);
-        env["VICTORY_LOG"] = "warn";
+        env["VICTORY_LOG"] = "error";   // the warm command prints its [progress]/[done] itself; warnings flooded the page
         env["VICTORY_WARM_PRIORITY"] = tier.Priority;
         env["VICTORY_WARM_BATCH"] = tier.Batch;
         var began = DateTime.Now;
@@ -1214,11 +1233,25 @@ sealed class Launch
         try
         {
             p = new Process { StartInfo = Start(file, args, cwd, env), EnableRaisingEvents = true };
-            p.OutputDataReceived += (_, e) => { if (e.Data != null) app.Out(ForPage(e.Data) + "\n"); };
-            p.ErrorDataReceived += (_, e) => { if (e.Data != null) app.Out(ForPage(e.Data) + "\n"); };
+            // (Victory) batch the output: one page message per line froze the UI while a warm-up prints fast
+            var pendingJob = new StringBuilder(); var jobGate = new object();
+            void JobOut(string? line)
+            {
+                if (line == null) return;
+                lock (jobGate) { if (pendingJob.Length < 160_000) pendingJob.AppendLine(ForPage(line)); }
+            }
+            string FlushJob()
+            {
+                lock (jobGate) { var t = pendingJob.ToString(); pendingJob.Clear(); return t; }
+            }
+            var jobTimer = new System.Threading.Timer(_ => { var t = FlushJob(); if (t.Length > 0) app.Out(t); }, null, 200, 200);
+            p.OutputDataReceived += (_, e) => JobOut(e.Data);
+            p.ErrorDataReceived += (_, e) => JobOut(e.Data);
             p.Exited += (_, _) =>
             {
                 p.WaitForExit();
+                try { jobTimer.Dispose(); } catch { }
+                var rest = FlushJob(); if (rest.Length > 0) app.Out(rest);
                 var code = 0; try { code = p.ExitCode; } catch { }
                 app.Out(code == 0 ? "--- 完成 ---\n" : $"--- 失败（退出代码 {code}）---\n", code == 0 ? "ok" : "bad");
                 job = null;
