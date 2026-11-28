@@ -286,9 +286,10 @@ const pathCode = (key) => st(key, '') ? `<code>${esc(st(key, ''))}</code>` : '';
 let SL = null;   // the last word from Get NVIDIA's files (progress, done, error)
 function nvidiaRows() {
   const gen = PC.rtx, fg = +st('framegen', 0), dlss = !!st('dlss', false), sl = S.sl || {};
+  const sm86 = !!S.sm86;   // RTX 20/30: the shipped dlssg-sm86 lets them generate 2x frames too
   const opts = [[0, '关闭'], [1, '2x'], [2, '3x'], [3, '4x'], [5, '6x']];
   const seg = `<div class="seg" role="radiogroup" aria-label="帧生成">${opts.map(([n, l]) =>
-    `<button data-fg="${n}" class="${fg === n ? 'on' : ''}" ${n > 0 && (gen < 40 || (n > 1 && gen < 50)) ? 'disabled' : ''}>${l}</button>`).join('')}</div>`;
+    `<button data-fg="${n}" class="${fg === n ? 'on' : ''}" ${n > 0 && (gen < 40 ? !(sm86 && gen >= 20 && n === 1) : n > 1 && gen < 50) ? 'disabled' : ''}>${l}</button>`).join('')}</div>`;
   const busy = !!sl.busy || SL?.state === 'progress';
   const wanted = fg > 0 || dlss;
   const ready = (fg === 0 || sl.frameOk) && (!dlss || sl.dlssOk);
@@ -298,7 +299,9 @@ function nvidiaRows() {
     : `<small class="warn">尚未就绪：就绪前开始游戏将不启用 DLSS。</small>`;
   return [
     row('帧生成（DLSS）', gen >= 50 ? `DLSS 在游戏两帧之间生成的帧数（${esc(PC.gpu)}：最高 6 倍）`
-      : gen >= 40 ? `DLSS 在游戏两帧之间生成的帧数（${esc(PC.gpu)}：2 倍；更高需要 RTX 50）` : `需要 RTX 40 或 50 显卡（你的显卡：${esc(PC.gpu)}）`, seg),
+      : gen >= 40 ? `DLSS 在游戏两帧之间生成的帧数（${esc(PC.gpu)}：2 倍；更高需要 RTX 50）`
+      : sm86 && gen >= 20 ? `RTX 30 通过包内 dlssg-sm86 支持 2 倍帧生成（实验；需要 DLSS 超分）`
+      : `需要 RTX 40/50，或启动器旁有 dlssg-sm86 文件夹（你的显卡：${esc(PC.gpu)}）`, seg),
     row('DLSS 超分辨率', 'DLSS 将接管游戏自带的超分；此时上面的 FidelityFX DLL 不再使用', tog('dlss', dlss, 'DLSS 超分辨率')),
     row('获取 NVIDIA 文件', '从 NVIDIA 的 GitHub 下载 Streamline SDK（276 MB），在 <code>%LOCALAPPDATA%\\Victory\\streamline</code> 中只保留 10–67 MB；只有经 NVIDIA 签名的 DLL 才会保留。仅在你按下按钮时进行。',
       `<button class="mini" data-act="getSl" ${busy || S.running ? 'disabled' : ''}>${busy ? '处理中…' : ready && wanted ? '重新检查' : '获取 NVIDIA 文件'}</button>`, status),

@@ -84,6 +84,7 @@ sealed class Launch
             ["fsrOk"] = S("fsrDll").Length == 0 || File.Exists(S("fsrDll")),
             ["dlssOn"] = B("dlss", false) && Rtx() >= 20,
             ["vendor"] = Vendor(), ["gpuName"] = GpuName(), ["os"] = Environment.OSVersion.VersionString,
+            ["sm86"] = Sm86Dir() != null,
             ["sl"] = SlStatus(),
             ["history"] = HistoryCopy(),
             // (Neptune) cold, failed, build, flags or warm, and the key it was judged by
@@ -141,6 +142,16 @@ sealed class Launch
             foreach (var n in new[] { "nvidia-sdk", "streamline", "dlssg" })
                 if (DllDir(Path.Combine(root, n)) is string found) return bundledNvidiaCached = found;
         bundledNvidiaCached = "";
+        return null;
+    }
+    // (Victory) dlssg-sm86 beside the release): lets RTX 20/30 generate frames too
+    string? Sm86Dir()
+    {
+        foreach (var baseDir in new[] { Bundled, ReleaseDir() ?? "" }.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var d = Path.Combine(baseDir, "dlssg-sm86");
+            if (File.Exists(Path.Combine(d, "version.dll"))) return d;
+        }
         return null;
     }
     string? vendorCached;
@@ -488,6 +499,21 @@ sealed class Launch
         var nvidia = vendor == "nvidia" || Rtx() >= 20;
         if (dlssOn && !nvidia) { dlssOn = false; notes.Add("未检测到 NVIDIA 显卡：DLSS 已关闭（AMD/Intel 用 FSR）"); }
         if (dlssOn) { args.AddRange(["--dlss", S("dlssMode", "quality")]); env["VICTORY_DLSS"] = "1"; }
+        if (fgFrames > 0 && nvidia && Rtx() is >= 20 and < 40)
+        {
+            if (Sm86Dir() == null)
+            {
+                notes.Add("RTX 30 及更早的显卡要开帧生成，需要启动器旁边的 dlssg-sm86 文件夹（完整版自带）：已关闭");
+                fgFrames = 0;
+            }
+            else
+            {
+                if (fgFrames > 1) notes.Add("dlssg-sm86 只支持 2 倍帧生成：已改为 2x");
+                fgFrames = 1;
+                if (!dlssOn) { dlssOn = true; env["VICTORY_DLSS"] = "1"; notes.Add("RTX 30 的帧生成需要 DLSS 超分：已自动开启 DLSS"); }
+                if (!env.ContainsKey("VICTORY_DLSSG_SM86_DIR")) env["VICTORY_DLSSG_SM86_DIR"] = WinPath(Sm86Dir()!);
+            }
+        }
         if (fgFrames > 0)
         {
             if (nvidia)
