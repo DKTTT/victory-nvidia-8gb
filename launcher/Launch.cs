@@ -742,7 +742,7 @@ settings["autoTuneSig"] = sig; settings["autoTune"] = "1";
             {
                 // FSR frame generation is vendor-neutral; the shipped amd-sdk has the FSR DLLs
                 args.AddRange(["--framegen", "2"]);
-                args.AddRange(["--fg-type", "fsr"]);
+                if (KernelHasFgType(exe)) args.AddRange(["--fg-type", "fsr"]);
                 env["VICTORY_FRAMEGEN"] = "1";
                 env["VICTORY_FRAMEGEN_X"] = "2";
                 env["VICTORY_FRAMEGEN_BACKEND"] = "fsr";
@@ -1172,6 +1172,28 @@ settings["autoTuneSig"] = sig; settings["autoTune"] = "1";
         });
     }
     // 确认档位后跑全量预热（不带 --used，等于 ps1 的「火力全开」），优先级/批量交给内核
+    // (Victory) the stable v5 kernel has no --fg-type: FSR is asked for with VICTORY_FRAMEGEN_BACKEND instead.
+    static readonly Dictionary<string, bool> FgTypeCache = new(StringComparer.OrdinalIgnoreCase);
+    static bool KernelHasFgType(string exe)
+    {
+        if (FgTypeCache.TryGetValue(exe, out var known)) return known;
+        var ok = false;
+        try
+        {
+            using var pr = Process.Start(new ProcessStartInfo
+            {
+                FileName = exe, Arguments = "play --help", UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            })!;
+            var text = pr.StandardOutput.ReadToEnd() + pr.StandardError.ReadToEnd();
+            pr.WaitForExit(8000);
+            ok = text.Contains("--fg-type", StringComparison.Ordinal);
+        }
+        catch { }
+        FgTypeCache[exe] = ok;
+        return ok;
+    }
+
     void StartWarmTier(string id, string key)
     {
         var (exeDir, play, label) = Target(id);
