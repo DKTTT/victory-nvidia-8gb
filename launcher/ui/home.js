@@ -481,6 +481,7 @@ const SECTIONS = {
   ]],
   logs: () => ['日志与问题报告', '每次运行都会写入日志。提交问题报告时请一并发送。', [
     row('日志文件夹', '上次运行的完整输出', '<button class="mini" data-act="logs">打开</button>'),
+    row('提取日志压缩包', '把最近 5 次运行的日志打包成 zip，报问题时直接发给作者', '<button class="mini" data-act="exportLogs">提取日志</button>'),
     // (Victory) shipped docs: a single-exe release extracts them into its payload and opens them from there
     row('从零开始教程', '新玩家的完整步骤（随启动器附带）', '<button class="mini" data-act="doc" data-key="tutorial">打开</button>'),
     row('启动器说明', '启动器与文件说明（README-中文.txt）', '<button class="mini" data-act="doc" data-key="readme">打开</button>'),
@@ -633,6 +634,7 @@ document.addEventListener('click', (e) => {
     case 'warm': return send({ cmd: 'launch.warm', id: ID });
     case 'getSl': SL = { state: 'progress', text: '启动中…' }; renderSettings(); return send({ cmd: 'launch.getStreamline' });
     case 'logs': return send({ cmd: 'launch.openLogs' });
+    case 'exportLogs': return send({ cmd: 'launch.exportLogs' });
     case 'doc': return send({ cmd: 'launch.openDoc', key: act.dataset.key });
     case 'saves': closeSettings(); return show('saves');
     case 'saveFolder': return send({ cmd: 'openFolder' });

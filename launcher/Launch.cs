@@ -1,6 +1,7 @@
 ﻿// Running Neptune: its tuned switch set ([`Preset`]), Series S with the title's own upscaler or
 // Series X, auto-A; the PC's paths from Settings.
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -202,6 +203,55 @@ sealed class Launch
         return dlss;
     }
 
+    // (Victory) pack the newest runs' logs into one zip the player can send; the save dialog picks where.
+    void ExportLogs(JsonObject m)
+    {
+        try
+        {
+            var dirs = new[]
+            {
+                logDir,
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "logs"),
+            }.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var files = dirs.SelectMany(d => Directory.EnumerateFiles(d))
+                .Where(f => f.EndsWith(".log", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+                .Select(f => new FileInfo(f))
+                .Where(f => f.Exists)
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .Take(5)
+                .ToList();
+            if (files.Count == 0) { app.Out("\n没有找到日志：先启动一次游戏，再点「提取日志」\n", "bad"); return; }
+            var chosen = (string?)m["path"];
+            chosen ??= app.Host.ChooseExport("Victory-日志-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".zip");
+            if (chosen is not { Length: > 0 }) return;
+            var temp = Path.Combine(Path.GetTempPath(), "victory-logs-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            foreach (var f in files)
+            {
+                var name = Path.GetFileName(f.FullName);
+                var target = Path.Combine(temp, name);
+                for (var i = 2; File.Exists(target); i++) target = Path.Combine(temp, Path.GetFileNameWithoutExtension(name) + "-" + i + Path.GetExtension(name));
+                File.Copy(f.FullName, target, true);
+            }
+            var info = new StringBuilder();
+            info.AppendLine("GTA6 CN · Victory 日志包");
+            info.AppendLine("时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            info.AppendLine("系统: " + Environment.OSVersion.VersionString + " (" + Environment.OSVersion.Version + ")");
+            info.AppendLine("显卡: " + GpuName());
+            info.AppendLine("游戏: " + S("game"));
+            info.AppendLine("存档目录: " + (S("dataDir") is { Length: > 0 } dd ? dd : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "data")));
+            var rel = ReleaseInfo();
+            info.AppendLine("版本: " + rel.ToJsonString());
+            File.WriteAllText(Path.Combine(temp, "信息.txt"), info.ToString(), new UTF8Encoding(false));
+            if (File.Exists(chosen)) File.Delete(chosen);
+            ZipFile.CreateFromDirectory(temp, chosen, CompressionLevel.Optimal, false);
+            Directory.Delete(temp, true);
+            app.Out("\n已提取最近 " + files.Count + " 个日志 → " + chosen + "\n", "ok");
+            app.Host.RevealExport(chosen);
+        }
+        catch (Exception e) { app.Out("\n提取日志失败：" + e.Message + "\n", "bad"); }
+    }
+
     public void OnMessage(string cmd, JsonObject m)
     {
         switch (cmd)
@@ -256,6 +306,7 @@ sealed class Launch
             case "stop": stopping = true; try { game?.Kill(true); } catch { } break;
             case "cancelJob": try { job?.Kill(true); } catch { } break;
             case "openLogs": Directory.CreateDirectory(logDir); Open(logDir); break;
+            case "exportLogs": ExportLogs(m); break;
             // (Victory) the docs shipped with the release: opened from the package folder or the extracted payload
             case "openDoc": OpenDoc((string?)m["key"] ?? ""); break;
             case "pcinfo": _ = Task.Run(SendPcInfo); break;
