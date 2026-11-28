@@ -61,6 +61,14 @@ impl Object {
 
 pub(crate) type This = *const Object;
 
+/// One interface method by name: for the XS slot self-check (`crate::xs`).
+/// Raw pointers are not `Sync`, and these are function addresses kept in a
+/// static, which is what the check reads.
+#[derive(Clone, Copy)]
+pub(crate) struct Named(pub(crate) &'static str, pub(crate) *const ());
+// SAFETY: the pointer is a function address, immutable for the run.
+unsafe impl Sync for Named {}
+
 #[repr(transparent)]
 pub(crate) struct Table<const N: usize>(pub [*const (); N]);
 // SAFETY: function addresses only.

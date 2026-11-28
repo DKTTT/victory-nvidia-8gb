@@ -417,6 +417,11 @@ impl Drop for StagingPiece {
 
 /// `bytes` of upload memory, all zeros: the buffer it lies in, where in
 /// that buffer, and its mapping. `None`: not pooled.
+///
+/// The block is a plain `D3D12_HEAP_TYPE_UPLOAD` buffer, so it is linear
+/// staging, which is what the console's CPU-visible creation flags
+/// (`0x100`/`0x200`, [`crate::device::cpu_visible_staging`]) ask for; readback
+/// buffers are made the same way. No tiled or swizzled staging exists here.
 pub(crate) fn staging(host: &crate::host::Host, bytes: u64) -> Option<(StagingPiece, ID3D12Resource, u64, *mut u8)> {
     if !on() {
         return None;

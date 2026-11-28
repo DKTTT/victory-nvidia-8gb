@@ -1909,6 +1909,19 @@ static FUNCTIONS: Table<24> = {
     Table(f)
 };
 
+/// The descriptor heap's table, for the XS slot self-check (`crate::xs`).
+pub(crate) fn heap_table() -> &'static [*const ()] {
+    &FUNCTIONS.0
+}
+
+/// The heap methods the console's porting notes (PORTING.md) name, as this
+/// module puts them.
+pub(crate) fn heap_methods() -> &'static [crate::object::Named] {
+    use crate::object::Named;
+    static METHODS: [Named; 1] = [Named("GetCPUDescriptorHandleForHeapStart", start as *const ())];
+    &METHODS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1259,7 +1259,7 @@ const METHODS: [(usize, *const ()); 15] = [
     (2, release as *const ()),
     (7, object::parent_device as *const ()), // 0x38
     (10, execute as *const ()),              // 0x50
-    (11, marker as *const ()),               // 0x58 set marker
+    (11, marker as *const ()),               // 0x58 set marker (the XS notes put UpdateTileMappings here: crate::xs logs it)
     (12, marker as *const ()),               // 0x60 begin event
     (13, marker as *const ()),               // 0x68 end event
     (14, signal as *const ()),               // 0x70
@@ -1296,6 +1296,30 @@ const fn queue_table(newer: bool) -> [*const (); 36] {
 
 static FUNCTIONS: Table<36> = Table(queue_table(false));
 static NEWER_FUNCTIONS: Table<36> = Table(queue_table(true));
+
+/// The queue's table for one layout, for the XS slot self-check
+/// (`crate::xs`).
+pub(crate) fn table(newer: bool) -> &'static [*const ()] {
+    if newer {
+        &NEWER_FUNCTIONS.0
+    } else {
+        &FUNCTIONS.0
+    }
+}
+
+/// The queue methods the console's porting notes (PORTING.md) name, as this
+/// module puts them.
+pub(crate) fn methods() -> &'static [crate::object::Named] {
+    use crate::object::Named;
+    static METHODS: [Named; 3] = [
+        Named("ExecuteCommandLists", execute as *const ()),
+        // Desktop's `SetMarker`, where PORTING.md's XS layout says
+        // `UpdateTileMappings`: the check shows the difference.
+        Named("SetMarker", marker as *const ()),
+        Named("Signal", signal as *const ()),
+    ];
+    &METHODS
+}
 
 #[cfg(test)]
 mod tests {

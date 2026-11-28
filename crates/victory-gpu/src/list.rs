@@ -2441,6 +2441,34 @@ const fn list_table(newer: bool) -> [*const (); 160] {
 /// titles add.
 static LIST_FUNCTIONS: Table<160> = Table(list_table(false));
 static NEWER_LIST_FUNCTIONS: Table<160> = Table(list_table(true));
+
+/// A list table for one layout, for the XS slot self-check (`crate::xs`).
+pub(crate) fn table(newer: bool) -> &'static [*const ()] {
+    if newer {
+        &NEWER_LIST_FUNCTIONS.0
+    } else {
+        &LIST_FUNCTIONS.0
+    }
+}
+
+/// The list methods the console's porting notes name (PORTING.md, and the
+/// `slots` list in the scarlett patch's `XsWrappers.h`), as this module puts
+/// them. `CopyTiles` and `CopyRaytracingAccelerationStructure` are not among
+/// them: this build reads tiled resources through the page pool, and the
+/// check says so.
+pub(crate) fn methods() -> &'static [crate::object::Named] {
+    use crate::object::Named;
+    static METHODS: [Named; 7] = [
+        Named("Close", close as *const ()),
+        Named("Reset", reset as *const ()),
+        Named("CopyBufferRegion", copy_buffer_region as *const ()),
+        Named("CopyTextureRegion", copy_texture_region as *const ()),
+        Named("CopyResource", copy_resource as *const ()),
+        Named("ResourceBarrier", barrier as *const ()),
+        Named("Barrier", barrier_groups as *const ()),
+    ];
+    &METHODS
+}
 /// Of lists whose calls are written down.
 #[cfg(windows)]
 static THIN_FUNCTIONS: Table<160> = Table(thin::table(false));

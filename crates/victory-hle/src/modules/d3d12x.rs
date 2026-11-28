@@ -11,6 +11,9 @@ use crate::{HleExport, HleModule};
 
 /// Device creation; first hands the device the title's general allocator
 /// (`XMemAlloc`, which honours the title's hooks) for resource memory.
+/// `parameters` is `D3D12XBOX_CREATE_DEVICE_PARAMETERS` (version word first,
+/// `CreateDeviceFlags` at 0x3c, 0x50 bytes: `victory_gpu::device::create`
+/// checks the layout and logs the flags).
 extern "system" fn create_device(
     adapter: *const c_void,
     parameters: *const u32,

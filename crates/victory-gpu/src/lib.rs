@@ -117,6 +117,10 @@ mod watch;
 #[cfg(windows)]
 mod texback;
 
+/// The console's interface layout, checked against this build's tables
+/// (`VICTORY_D3D12X_SLOTS=1`): logging only, never a slot change.
+mod xs;
+
 #[cfg(windows)]
 pub use host::on_failure;
 

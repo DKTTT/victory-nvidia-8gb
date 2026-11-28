@@ -62,6 +62,9 @@ const RESOURCE_IIDS: [Iid; 4] = [
 
 const KIB_64: u64 = 64 << 10;
 const MIB_4: u64 = 4 << 20;
+/// `D3D12_HEAP_TYPE_DEFAULT`: the heap kind a resource the CPU never maps
+/// gets.
+const HEAP_DEFAULT: u32 = 1;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -941,14 +944,61 @@ pub(crate) extern "system" fn allocation_info(
     out
 }
 
-/// The newer description: the plain one, then a sampler feedback mip
-/// region (width, height, depth).
+/// The newer description (`D3D12_RESOURCE_DESC1`, the d3d12_xs reference's
+/// page and PC's alike): the plain description's fields, then the sampler
+/// feedback mip region at +0x34. The structure is 64 bytes: the plain
+/// description's trailing 8-byte alignment padding (its Rust size is 56) is
+/// not part of this packing. Nesting the two would put the mip region at
+/// +0x38 and every description after the first at +0x48 instead of +0x40,
+/// which reads the wrong sizes.
 #[repr(C)]
 pub(crate) struct ResourceDesc1 {
-    desc: ResourceDesc,
+    dimension: u32,
+    alignment: u64,
+    width: u64,
+    height: u32,
+    depth_or_array_size: u16,
+    mip_levels: u16,
+    format: u32,
+    sample_count: u32,
+    sample_quality: u32,
+    layout: u32,
+    flags: u32,
+    /// Sampler feedback region (width, height, depth): no sampler feedback
+    /// resources are made here, kept because it is part of the size.
+    #[allow(dead_code)]
     mip_region: [u32; 3],
 }
-const _: () = assert!(size_of::<ResourceDesc1>() == 72);
+const _: () = {
+    use std::mem::offset_of;
+    assert!(offset_of!(ResourceDesc1, alignment) == 0x08);
+    assert!(offset_of!(ResourceDesc1, width) == 0x10);
+    assert!(offset_of!(ResourceDesc1, format) == 0x20);
+    assert!(offset_of!(ResourceDesc1, layout) == 0x2c);
+    assert!(offset_of!(ResourceDesc1, flags) == 0x30);
+    assert!(offset_of!(ResourceDesc1, mip_region) == 0x34);
+    assert!(size_of::<ResourceDesc1>() == 0x40);
+};
+
+impl ResourceDesc1 {
+    /// The plain description these fields spell (the mip region only
+    /// describes sampler feedback resources, which are not made here).
+    fn description(&self) -> ResourceDesc {
+        ResourceDesc {
+            dimension: self.dimension,
+            alignment: self.alignment,
+            width: self.width,
+            height: self.height,
+            depth_or_array_size: self.depth_or_array_size,
+            mip_levels: self.mip_levels,
+            format: self.format,
+            sample_count: self.sample_count,
+            sample_quality: self.sample_quality,
+            layout: self.layout,
+            flags: self.flags,
+        }
+    }
+}
 
 /// Where one resource goes in [`allocation_info2`]'s placement.
 #[repr(C)]
@@ -974,7 +1024,11 @@ pub(crate) extern "system" fn allocation_info2(
         // SAFETY: the title passes `count` descriptions.
         unsafe { std::slice::from_raw_parts(descs, count as usize) }
     };
-    let total = place(descs.iter().map(|d| &d.desc), |i, info| {
+    // Each description is 64 bytes; the plain structure's own trailing
+    // padding makes it 56, so copy the fields out instead of assuming the
+    // two nest.
+    let plain: Vec<ResourceDesc> = descs.iter().map(ResourceDesc1::description).collect();
+    let total = place(plain.iter(), |i, info| {
         if !each.is_null() {
             // SAFETY: the title passes room for `count` entries.
             unsafe { each.add(i).write(info) };
@@ -3265,6 +3319,21 @@ pub(crate) extern "system" fn create_committed(
         heap = heap.kind,
         "committed resource"
     );
+    if heap.kind != HEAP_DEFAULT && crate::device::cpu_visible_staging() {
+        // The console's CPU-visible special creation flags (0x100/0x200: an
+        // engine resource's flags word, recorded here off the device
+        // creation blob) choose linear staging for Readback and Upload. The
+        // host's READBACK/UPLOAD heaps are linear already, so this choice
+        // does not change; log once that the title asked, so a run shows it.
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::info!(
+                heap = heap.kind,
+                flags = format_args!("{:#x}", crate::device::creation_flags()),
+                "CPU-visible creation flags: readback/upload resources use the host's linear staging heaps"
+            );
+        });
+    }
     let memory = match Memory::for_resource(info, heap.kind) {
         Ok(memory) => memory,
         Err(hr) => return hr,
@@ -3725,6 +3794,24 @@ static RESOURCE_FUNCTIONS: Table<32> = {
     Table(f)
 };
 
+/// The resource's table, for the XS slot self-check (`crate::xs`).
+pub(crate) fn table() -> &'static [*const ()] {
+    &RESOURCE_FUNCTIONS.0
+}
+
+/// The resource methods the console's porting notes (PORTING.md) name, as
+/// this module puts them.
+pub(crate) fn methods() -> &'static [crate::object::Named] {
+    use crate::object::Named;
+    static METHODS: [Named; 4] = [
+        Named("Map", map as *const ()),
+        Named("Unmap", unmap as *const ()),
+        Named("GetDesc", resource_desc as *const ()),
+        Named("GetGPUVirtualAddress", gpu_address as *const ()),
+    ];
+    &METHODS
+}
+
 #[cfg(test)]
 pub(crate) fn test_buffer(width: u64) -> This {
     let heap = HeapProperties {
@@ -3946,6 +4033,50 @@ mod tests {
         assert_ne!(
             create(device, 0, &desc, u32::MAX, null, &RESOURCE_IIDS[0], &mut r),
             0
+        );
+    }
+
+    /// `D3D12_RESOURCE_DESC1` is 64 bytes: the plain description's fields,
+    /// then the 12-byte sampler feedback region at 0x34. The stride matters
+    /// from the second description of a list on.
+    #[test]
+    fn resource_desc1_is_64_bytes_and_reads_at_its_own_stride() {
+        assert_eq!(size_of::<ResourceDesc1>(), 64);
+        assert_eq!(std::mem::offset_of!(ResourceDesc1, mip_region), 0x34);
+        let mut bytes = [0u8; 128];
+        // SAFETY: the buffer has room for each 56-byte description.
+        unsafe {
+            bytes
+                .as_mut_ptr()
+                .cast::<ResourceDesc>()
+                .write_unaligned(buffer(100));
+            bytes
+                .as_mut_ptr()
+                .add(64)
+                .cast::<ResourceDesc>()
+                .write_unaligned(buffer(200));
+        }
+        let mut total = AllocationInfo {
+            size: 0,
+            alignment: 0,
+        };
+        // SAFETY: `bytes` holds two 64-byte descriptions.
+        allocation_info2(
+            &mut total,
+            std::ptr::null(),
+            0,
+            2,
+            bytes.as_ptr().cast(),
+            std::ptr::null_mut(),
+        );
+        // Two 64 KiB buffers: the second description was read at +0x40, not
+        // inside the first one's mip region.
+        assert_eq!(
+            total,
+            AllocationInfo {
+                size: 2 * KIB_64,
+                alignment: KIB_64,
+            }
         );
     }
 

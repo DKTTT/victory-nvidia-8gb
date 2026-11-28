@@ -204,6 +204,19 @@ static FUNCTIONS: Table<24> = {
     Table(f)
 };
 
+/// The fence's table, for the XS slot self-check (`crate::xs`).
+pub(crate) fn table() -> &'static [*const ()] {
+    &FUNCTIONS.0
+}
+
+/// The fence method the console's porting notes (PORTING.md) name, as this
+/// module puts it.
+pub(crate) fn methods() -> &'static [crate::object::Named] {
+    use crate::object::Named;
+    static METHODS: [Named; 1] = [Named("GetCompletedValue", completed_called as *const ())];
+    &METHODS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
