@@ -1,4 +1,4 @@
-﻿// GTA6 CN · Victory, the player's launcher. Talks to the host (App.cs) with web messages:
+// GTA6 CN · Victory, the player's launcher. Talks to the host (App.cs) with web messages:
 // launch.* (run, warm, settings, PC checks), win.* (the window's buttons), the rest go to the save manager.
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -108,8 +108,9 @@ function renderHome() {
   $('#mode').disabled = running;
   const warmBtn = $('#warmBtn');
   warmBtn.textContent = job ? '取消' : '预热着色器';
-  warmBtn.disabled = running || (!job && (!gameOk || !filesOk || S.shaderState === 'empty'));
-  warmBtn.title = !job && S.shaderState === 'empty' ? '请先玩一次：游戏首次运行时会列出它的着色器' : '';
+  // (Victory) 点它总是先打开档位选择；只有还没选好游戏文件时才不能点
+  warmBtn.disabled = running || (!job && (!gameOk || !filesOk));
+  warmBtn.title = !gameOk || !filesOk ? '请先在设置里选择游戏文件' : '';
   $('#warmBar').hidden = !job;
   const wp = warmProgress();
   $('#warmText').textContent = wp.line;
@@ -378,6 +379,36 @@ function warmDlgDone() {
   closeWarmDlg();
 }
 
+// ---------------- (Victory) 预热档位：火力全开（照 预热-火力全开.ps1），确认后才开始 ----------------
+let WT = null;   // 主机算好的档位（进程数已按当前内存下调）
+let FG = null;   // 自动查找游戏的结果（ok/path），在设置与欢迎页显示一行提示
+function openTierDlg(m) {
+  if (!m?.tiers?.length) return;
+  WT = m;
+  WT.selected = m.tiers.some((t) => t.key === 'balanced') ? 'balanced' : m.tiers[0].key;
+  $('#tierDlg').hidden = false;
+  renderTierDlg();
+}
+function closeTierDlg() { $('#tierDlg').hidden = true; }
+function renderTierDlg() {
+  const m = WT;
+  if (!m) return;
+  const ram = m.freeGb > 0 ? ` · 可用内存 ${m.freeGb} GB` : '';
+  $('#tierIntro').textContent = `你的 CPU：${m.cores} 线程${ram}。档位越高越快，桌面也越卡；预计时间来自上次预热。`;
+  $('#tierList').innerHTML = m.tiers.map((t) => `<button class="tier${t.key === m.selected ? ' on' : ''}" data-tier="${esc(t.key)}" role="radio" aria-checked="${t.key === m.selected}">
+      <b>${esc(t.name)}${t.alias ? `<em>脚本档位：${esc(t.alias)}</em>` : ''}</b>
+      <span>进程数 ${t.jobs} · 优先级 ${esc(t.priorityText)}</span>
+      <span class="eta">预计时间：${esc(t.eta)}</span></button>`).join('');
+  const note = $('#tierRam');
+  note.hidden = !m.ramNote;
+  note.textContent = m.ramNote || '';
+}
+function tierSend() {
+  const key = WT?.selected || 'balanced';
+  closeTierDlg();
+  send({ cmd: 'launch.warmStart', id: ID, tier: key });
+}
+
 // once: an RTX card, its files not there, not answered before, the welcome steps done, nothing running
 function maybeAskDlss() {
   if (dlg || !rtxGen() || dlssReady() || dlssBusy() || st('dlssAsked', false) || !st('setupDone', false)) return;
@@ -386,7 +417,9 @@ function maybeAskDlss() {
 }
 const SECTIONS = {
   general: () => ['通用', '你的游戏与 GTA6 CN · Victory。', [
-    row((S.gameOk ? '' : bang) + '游戏文件', S.gameOk ? '<span class="ok">已找到 game_scarlett_master.exe</span>' : '你自己 Xbox Series 转储中的文件夹', '<button class="mini" data-pick="game">选择…</button>', pathCode('game')),
+    row((S.gameOk ? '' : bang) + '游戏文件', S.gameOk ? '<span class="ok">已找到 game_scarlett_master.exe</span>' : '你自己 Xbox Series 转储中的文件夹',
+      '<div class="acts"><button class="mini" data-find="game">自动查找</button><button class="mini" data-pick="game">选择…</button></div>',
+      pathCode('game') + (FG ? `<small class="${FG.ok ? 'ok' : 'bad'}">${FG.ok ? '已自动找到并填好游戏路径。' : '没有自动找到游戏，请手动选择。'}</small>` : '')),
     // only for a launcher that isn't inside a release (testing from a build): a normal install never shows this
     ...(S.bundled ? [] : [row(S.filesOk ? '启动器文件' : bang + '<span class="bad">未找到 GTA6 CN · Victory 文件</span>',
       '启动器通常位于 GTA6 CN · Victory 文件夹中。当前启动器不在该位置，请将其指向 Victory 文件夹。',
@@ -467,8 +500,9 @@ function renderWelcome() {
   $$('.wpage').forEach((p, i) => p.classList.toggle('away', i !== step));
   const g = st('game', '');
   $('#w0').innerHTML = `
-    <div><label>游戏</label><div class="sub">你自己的 Xbox Series 转储：选择其中的 game_scarlett_master.exe</div>
-      <div class="pick"><div class="field${g ? '' : ' empty'}">${g ? esc(folder(g)) : '未选择文件夹'}</div><button data-pick="game">浏览…</button></div></div>
+    <div><label>游戏</label><div class="sub">你自己的 Xbox Series 转储：选择其中的 game_scarlett_master.exe，或让启动器自动查找</div>
+      <div class="pick"><div class="field${g ? '' : ' empty'}">${g ? esc(folder(g)) : '未选择文件夹'}</div><button data-find="game">自动查找</button><button data-pick="game">浏览…</button></div>
+      ${FG ? `<div class="fine ${FG.ok ? 'ok' : 'bad'}">${FG.ok ? '已自动找到并填好游戏路径。' : '没有自动找到游戏，请手动选择。'}</div>` : ''}</div>
     ${S.filesOk ? '' : `<div><label class="bad">未找到 GTA6 CN · Victory 文件</label><div class="sub">启动器通常位于 GTA6 CN · Victory 文件夹中，与 victory.exe 相邻。当前启动器不在该位置：请将其指向 Victory 文件夹。</div>
       <div class="pick"><div class="field empty">未选择文件夹</div><button data-pickdir="neptuneDir">浏览…</button></div></div>`}
     <div class="checklist">
@@ -522,6 +556,11 @@ document.addEventListener('click', (e) => {
   if (t.closest('#warmPrep')) { warmDlgDone(); return send({ cmd: 'launch.warm', id: ID }); }
   if (t.closest('#warmAnyway')) { warmDlgDone(); return play(); }
   if (t.closest('#warmClose')) return closeWarmDlg();
+  // (Victory) 档位窗：选中一个再按「继续」才开始；取消什么都不做
+  if (t.closest('#tierGo')) return tierSend();
+  if (t.closest('#tierCancel')) return closeTierDlg();
+  const tr = t.closest('[data-tier]');
+  if (tr && WT) { WT.selected = tr.dataset.tier; return renderTierDlg(); }
   if (t.closest('#warmBtn')) return job ? send({ cmd: 'launch.cancelJob' }) : send({ cmd: 'launch.warm', id: ID });
   // (Victory) DLSS: Get DLSS opens the dialog; Download fetches all eight of NVIDIA's files
   if (t.closest('#dlssBtn')) return openDlg('ask');
@@ -536,6 +575,8 @@ document.addEventListener('click', (e) => {
   const dfg = t.closest('[data-dfg]'); if (dfg) return dlssChoose(dfg.dataset.dfg);
 
   const pk = t.closest('[data-pick]'); if (pk) return send({ cmd: 'launch.pickGame' });
+  // (Victory) 自动查找游戏目录：成功时设置消息会把路径填好
+  const fd = t.closest('[data-find]'); if (fd) return send({ cmd: 'launch.findGame' });
   const pd = t.closest('[data-pickdir]'); if (pd) return send({ cmd: 'launch.pickFolder', key: pd.dataset.pickdir, title: pd.dataset.title || (pd.dataset.pickdir === 'neptuneDir' ? 'GTA6 CN · Victory 文件夹' : 'OptiScaler 文件夹') });
   const fgb = t.closest('[data-fg]'); if (fgb) { set({ framegen: +fgb.dataset.fg }); SL = null; return renderSettings(); }
   const pf = t.closest('[data-pickfile]'); if (pf) return send({ cmd: 'launch.pickFile', key: pf.dataset.pickfile });
@@ -583,6 +624,8 @@ document.addEventListener('change', (e) => {
 });
 $('#q').addEventListener('input', () => renderSettings());
 document.addEventListener('keydown', (e) => {
+  // (Victory) 档位窗：Esc 等于取消
+  if (e.key === 'Escape' && !$('#tierDlg').hidden) { closeTierDlg(); return; }
   // (Victory) Esc on the first question counts as Not now, so it does not come back
   if (e.key === 'Escape' && !$('#warmDlg').hidden) { closeWarmDlg(); return; }
   if (e.key === 'Escape' && dlg) { if (dlg === 'ask') set({ dlssAsked: true }); closeDlg(); return; }
@@ -637,6 +680,15 @@ window.vismReceive = (m) => {
       else job = null;
       renderHome();
       if (!$('#welcome').hidden) renderWelcome();
+      break;
+    // (Victory) 预热档位表，来自主机（数值与 ps1 的「火力全开」一致）
+    case 'warmTiers': openTierDlg(m); break;
+    // (Victory) 自动查找游戏的结果：设置/欢迎页显示一行提示，成功时设置消息已把路径填好
+    case 'findGame':
+      FG = m;
+      renderHome();
+      if (!$('#welcome').hidden) renderWelcome();
+      if ($('#settings').classList.contains('open')) renderSettings();
       break;
     case 'out': {
       // (Victory) the warm-up's lines (apps/victory/src/warm.rs): its first line

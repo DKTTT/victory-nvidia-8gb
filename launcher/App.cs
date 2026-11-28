@@ -1,4 +1,4 @@
-﻿// Project Neptune launcher: the page's messages go to the launcher or the save manager.
+// Project Neptune launcher: the page's messages go to the launcher or the save manager.
 // Messages to the page are built as JsonObject, which needs no reflection (Native AOT).
 using System.Text.Json.Nodes;
 
@@ -50,6 +50,8 @@ sealed class App
                     Post(new JsonObject { ["type"] = "app", ["title"] = Title, ["test"] = test, ["os"] = OperatingSystem.IsWindows() ? "windows" : "linux", ["frame"] = host.CustomFrame,
                         ["release"] = launch.ReleaseInfo() });
                     launch.SendSettings();
+                    // (Victory) 启动时自动找一次游戏目录：只填空，不覆盖玩家已选的
+                    _ = System.Threading.Tasks.Task.Run(() => launch.FindGame(quiet: true));
                     return;
             }
             if (cmd.StartsWith("win.")) { host.Window(cmd[4..]); return; }

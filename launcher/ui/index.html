@@ -1,10 +1,10 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; font-src 'self' file:; base-uri 'none'; form-action 'none'">
 <title>GTA6 CN · Victory</title>
-<link rel="stylesheet" href="home.css?v=18">
+<link rel="stylesheet" href="home.css?v=19">
 </head>
 <body class="booting">
 <svg class="sky" aria-hidden="true" preserveAspectRatio="xMidYMid slice" viewBox="0 0 1280 800">
@@ -188,6 +188,25 @@
   </div>
 </div>
 
+<!-- ================= WARM TIERS (Victory): 火力全开的档位与警告，确认后才开始 ================= -->
+<div class="dlg" id="tierDlg" hidden>
+  <div class="dlgcard tiercard" role="dialog" aria-modal="true" aria-labelledby="tierTitle">
+    <div class="wtitle" id="tierTitle">预热着色器 · 选择档位</div>
+    <div class="sub" id="tierIntro"></div>
+    <div class="tiers" id="tierList" role="radiogroup" aria-label="预热档位"></div>
+    <div class="note bad" id="tierRam" hidden></div>
+    <div class="warnbox">
+      <b>请注意</b>
+      <p>预热会占满 CPU，游戏/桌面可能卡顿；笔记本请插电；可随时点停止，已完成的部分保留；建议不要在游戏运行时预热。</p>
+      <p>优先级最高只到「高」（绝不使用 Realtime）；内存不足时会自动减少进程数或降低优先级，不会蓝屏或系统中断。</p>
+    </div>
+    <div class="dlgfoot">
+      <button class="ghostbtn plain" id="tierCancel">取消</button>
+      <button class="primary lg" id="tierGo">继续（确认预热）</button>
+    </div>
+  </div>
+</div>
+
 <!-- ================= FIRST RUN ================= -->
 <div class="welcome" id="welcome" hidden>
   <div class="wplanet wglow" aria-hidden="true"></div>
@@ -214,7 +233,7 @@
   </div>
 </div>
 
-<script src="home.js?v=18"></script>
+<script src="home.js?v=19"></script>
 <script src="frame.js?v=3"></script>
 </body>
 </html>

@@ -1,11 +1,13 @@
-﻿# Victory 启动器（GTA6 CN）
+# Victory 启动器（GTA6 CN）
 
 GTA6 CN 的图形启动器：选游戏目录、开始游戏、预热着色器（带进度条/剩余时间）、设置、
 存档管理、电脑配置检查。
 
-- 双击 `VictoryLauncher.exe`；首次用 Browse 选 `game_scarlett_master.exe`。
-- 「预热着色器」只做以前真正画过的管线（`victory warm --used`），几分钟，Esc/取消可停；
-  全量预热仍用包里的「预热-火力全开.bat」。
+- 双击 `VictoryLauncher.exe`；首次用 Browse 选 `game_scarlett_master.exe`，或点「自动查找」
+  （启动器文件夹 / 上一级 / `game-path.txt` / `VICTORY_GAME_DIR` / 常见路径 / 各盘 `*GTA6*` 文件夹）。
+- 「预热着色器」先选「火力全开」档位（安静/平衡/暴力/极强，算法同 `预热-火力全开.ps1`：
+  进程数、优先级、批量，带内存保险），确认后跑全量预热（`victory warm --jobs N`），
+  进度条与停止按钮照旧，可随时停、已完成的部分保留。
 - 设置里可切 Series S/X、DLSS、帧生成；启动器会把设置通过 `victory play --set ...` 传给内核。
 - 存档页管理 `%LOCALAPPDATA%\victory\data\7952987A\saves`。
 

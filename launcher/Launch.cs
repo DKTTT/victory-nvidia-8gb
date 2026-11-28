@@ -1,4 +1,4 @@
-﻿// Running Neptune: its tuned switch set ([`Preset`]), Series S with the title's own upscaler or
+// Running Neptune: its tuned switch set ([`Preset`]), Series S with the title's own upscaler or
 // Series X, auto-A; the PC's paths from Settings.
 using System.Diagnostics;
 using System.Text;
@@ -20,6 +20,9 @@ sealed class Launch
     bool stopping;   // Stop was pressed: the exit that follows is not a crash
     Process? job;
     readonly Queue<(string label, string file, List<string> args, string cwd, Dictionary<string, string> env, Action<int>? done, bool low)> jobs = new();
+    // (Victory) 全量预热时看护内存：可用内存低于 1.5 GB 就把预热进程降到 BelowNormal（ps1 的看护进程）
+    CancellationTokenSource? warmWatch;
+    bool warmWatchSaid;
 
     public Launch(App app, string profile)
     {
@@ -44,11 +47,14 @@ sealed class Launch
         SaveHistory();
     }
     JsonNode HistoryCopy() { lock (history) return JsonNode.Parse(history.ToJsonString())!; }
-    void SetWarm(string id, int code, string key, double minutes)
+    void SetWarm(string id, int code, string key, double minutes, string? tier = null, int jobs = 0)
     {
         lock (history)
         {
             var h = Hist(id); h["warmAt"] = DateTime.Now.ToString("o"); h["warmCode"] = code; h["warmKey"] = key; h.Remove("warmStale");
+            // (Victory) 全量预热记录档位与进程数；下次打开档位窗时用来估计时间
+            h["warmFull"] = tier != null;
+            if (tier != null) { h["warmTier"] = tier; h["warmJobs"] = jobs; }
             if (code == 0) h["warmMinutes"] = Math.Round(minutes, 1);   // (Neptune) for the Play dialog's estimate
         }
         SaveHistory();
@@ -173,7 +179,11 @@ sealed class Launch
                     finally { Interlocked.Exchange(ref starting, 0); }
                 });
                 break;
-            case "warm": Warm((string?)m["id"] ?? "public"); break;
+            // (Victory) 预热着色器：先给页面「火力全开」的档位与警告，确认后再跑全量预热（不带 --used）
+            case "warm": SendWarmTiers((string?)m["id"] ?? "public"); break;
+            case "warmStart": StartWarmTier((string?)m["id"] ?? "public", (string?)m["tier"] ?? "balanced"); break;
+            // (Victory) 自动查找游戏目录（欢迎向导与设置里都有按钮）
+            case "findGame": _ = Task.Run(() => FindGame()); break;
             case "stop": stopping = true; try { game?.Kill(true); } catch { } break;
             case "cancelJob": try { job?.Kill(true); } catch { } break;
             case "openLogs": Directory.CreateDirectory(logDir); Open(logDir); break;
@@ -533,36 +543,248 @@ sealed class Launch
         lock (sb) return (p.ExitCode, sb.ToString());
     }
 
-    void Warm(string id)
+    // ---- (Victory) 预热着色器：「火力全开」档位（照 预热-火力全开.ps1 的算法） ----
+    // 安静/平衡/暴力/极强：预热进程数、内核子进程优先级、每批管线数；进程数封顶 48。
+    // ps1 里分别叫 静音/平衡/暴力/极限，这里是同一套算法与数值。
+    sealed record WarmTier(string Key, string Name, string Alias, int Jobs, string Priority, string PriorityText, string Batch);
+
+    static List<WarmTier> Tiers(int cores)
+    {
+        static int Cap(int n) => Math.Clamp(n, 1, 48);
+        return
+        [
+            new("quiet",    "安静", "静音", Cap(Math.Max(1, cores / 8)),                     "idle",   "空闲",     "40"),
+            new("balanced", "平衡", "",     Cap(Math.Max(2, (int)Math.Floor(cores * 0.75))), "normal", "普通",     "40"),
+            new("turbo",    "暴力", "",     Cap(Math.Min(Math.Max(4, cores * 2), 48)),       "above",  "高于普通", "80"),
+            new("extreme",  "极强", "极限", Cap(Math.Min(Math.Max(4, cores * 2), 48)),       "high",   "高",       "160"),
+        ];
+    }
+
+    // (Victory) ps1 的内存保险：每个预热进程约 0.75 GB，另外给系统留 4 GB：
+    // 只有 freeGB ≥ jobs×0.75 + 4 才开得下；否则 cap = max(2, floor((freeGB − 3) / 0.75))，并封顶 48。
+    static double FreeGb()
+    {
+        long total = 0, free = 0;
+        Memory(ref total, ref free);
+        return free / 1073741824.0;
+    }
+    static (int jobs, string? note) GuardJobs(int want)
+    {
+        var jobs = Math.Clamp(want, 1, 48);
+        string? note = jobs < want ? $"预热进程数上限 48：从 {want} 降到 {jobs}（安全起见）" : null;
+        double free;
+        try { free = FreeGb(); } catch { return (jobs, note); }
+        if (free > 0 && free < jobs * 0.75 + 4)
+        {
+            var cap = Math.Max(2, (int)Math.Floor((free - 3) / 0.75));
+            if (jobs > cap)
+            {
+                note = $"内存只有 {free:N1} GB 空闲，预热进程数从 {jobs} 降到 {cap}（安全起见）";
+                jobs = Math.Max(2, cap);
+            }
+        }
+        return (jobs, note);
+    }
+    double LastWarmMinutes(string id)
+    {
+        lock (history)
+        {
+            var v = Hist(id)["warmMinutes"];
+            if (v is JsonValue j && j.TryGetValue<double>(out var d)) return d;
+            if (v is JsonValue i && i.TryGetValue<int>(out var n)) return n;
+            return 0;
+        }
+    }
+    // 预计时间：用上次预热在历史里记下的分钟数；还没有就照实说
+    string EtaText(string id)
+    {
+        var mins = LastWarmMinutes(id);
+        if (mins <= 0) return "首次无法准确估计";
+        if (mins < 1) return "上次不到 1 分钟";
+        var m = (int)Math.Round(mins);
+        return m < 60 ? $"上次约 {m} 分钟" : $"上次约 {m / 60} 小时 {m % 60} 分钟";
+    }
+    // 页面点「预热着色器」时先给档位表：数值与真正运行时一致（进程数已按当前内存下调）
+    void SendWarmTiers(string id)
+    {
+        var cores = Environment.ProcessorCount;
+        double free = 0; try { free = FreeGb(); } catch { }
+        var tiers = new JsonArray();
+        var lowered = false;
+        foreach (var t in Tiers(cores))
+        {
+            var (jobs, note) = GuardJobs(t.Jobs);
+            if (note != null) lowered = true;
+            tiers.Add(new JsonObject
+            {
+                ["key"] = t.Key, ["name"] = t.Name, ["alias"] = t.Alias.Length > 0 ? t.Alias : null,
+                ["jobs"] = jobs, ["priority"] = t.Priority, ["priorityText"] = t.PriorityText, ["batch"] = t.Batch,
+                ["eta"] = EtaText(id),
+            });
+        }
+        app.Post(new JsonObject
+        {
+            ["type"] = "warmTiers", ["cores"] = cores, ["freeGb"] = Math.Round(free, 1),
+            ["lastMinutes"] = Math.Round(LastWarmMinutes(id), 1),
+            ["tiers"] = tiers,
+            ["ramNote"] = free > 0 && lowered ? $"当前可用内存 {free:N1} GB：部分档位的进程数已按内存自动下调（每个进程约 0.75 GB，另给系统留 4 GB）。" : null,
+        });
+    }
+    // 确认档位后跑全量预热（不带 --used，等于 ps1 的「火力全开」），优先级/批量交给内核
+    void StartWarmTier(string id, string key)
     {
         var (exeDir, play, label) = Target(id);
         var exe = exeDir == null ? "" : Path.Combine(exeDir, "victory.exe");
         if (!File.Exists(exe)) { app.Out("\n还没有可用于预热的 victory.exe。\n", "bad"); return; }
         if (!File.Exists(S("game"))) { app.Out("\n请先设置你的游戏（设置 › 通用）。\n", "bad"); return; }
-        // threads: every pipeline the driver builds at once takes its own memory, and on all 16
-        // threads the driver ran out ("Not enough memory resources", pipelines refused)
-        var (file, all) = Wrap(exe, ["warm", "--jobs", WarmJobs().ToString(), "--used"]);
-        // the same switches the run will have , so the run finds what this makes;
-        // VICTORY_LOG=warn: only its progress ("120 s  2000 shaders") and the summary, not a line per shader
-        var env = Env(id, exeDir!, play, null, [], say: false);
-        var key = WarmKey(env, exe);
-        env["VICTORY_LOG"] = "warn";
-        var began = DateTime.Now;
+        if (Busy) { app.Out("\n已有其它任务在运行：请等它结束再预热。\n", "bad"); return; }
+        var tiers = Tiers(Environment.ProcessorCount);
+        var tier = tiers.FirstOrDefault(t => t.Key == key) ?? tiers[1];
         // (Neptune) nothing known yet (a PC where the game has not run): nothing to warm
         if (ShaderState(id).state == "empty")
         {
             app.Out("\n暂无需准备：先玩一次，让游戏列出着色器，再在这里预热。\n", "bad");
             return;
         }
-        Queue($"{label}：准备着色器（预热）", file, all, exeDir!, env,
+        // 内存保险：不够就少开进程，并把原因写进输出
+        var (jobs, ramNote) = GuardJobs(tier.Jobs);
+        if (ramNote != null) app.Out("\n" + ramNote + "\n", "bad");
+        var (file, all) = Wrap(exe, ["warm", "--jobs", jobs.ToString()]);
+        // the same switches the run will have, so the run finds what this makes;
+        // VICTORY_LOG=warn: only its progress ("120 s  2000 shaders") and the summary, not a line per shader
+        var env = Env(id, exeDir!, play, null, [], say: false);
+        var warmKey = WarmKey(env, exe);
+        env["VICTORY_LOG"] = "warn";
+        env["VICTORY_WARM_PRIORITY"] = tier.Priority;
+        env["VICTORY_WARM_BATCH"] = tier.Batch;
+        var began = DateTime.Now;
+        app.Out($"\n预热档位：{tier.Name} —— 进程 {jobs}、优先级 {tier.PriorityText}、每批 {tier.Batch} 条。\n", "h");
+        StartWarmWatch();
+        Queue($"{label}：预热着色器（{tier.Name}档，{jobs} 进程）", file, all, exeDir!, env,
             code =>
             {
+                StopWarmWatch();
                 // a warm-up over nothing known is not a warm-up: it is not recorded (the card stays Cold)
                 if (code == 0 && CountNow(exe, exeDir!, env) is (0, _))
                     app.Out("\n没有准备任何内容：游戏尚未列出着色器。先玩一次，再在这里预热。\n", "bad");
-                else SetWarm(id, code, key, (DateTime.Now - began).TotalMinutes);
+                else SetWarm(id, code, warmKey, (DateTime.Now - began).TotalMinutes, tier.Key, jobs);
                 SendSettings();
             }, low: true);
+    }
+
+    // 全量预热期间：可用内存低于 1.5 GB 时把本次的预热进程降到 BelowNormal（ps1 的看护进程）
+    void StartWarmWatch()
+    {
+        StopWarmWatch();
+        var cts = new CancellationTokenSource();
+        warmWatch = cts; warmWatchSaid = false;
+        var began = DateTime.Now.AddSeconds(-3);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    await Task.Delay(2000, cts.Token).ConfigureAwait(false);
+                    if (job == null) break;   // the warm-up ended
+                    double free = 0; try { free = FreeGb(); } catch { }
+                    if (free <= 0 || free >= 1.5) continue;
+                    foreach (var p in Process.GetProcessesByName("victory"))
+                    {
+                        try
+                        {
+                            if (p.StartTime < began) continue;   // not one of this warm-up's
+                            if (p.PriorityClass != ProcessPriorityClass.BelowNormal) p.PriorityClass = ProcessPriorityClass.BelowNormal;
+                        }
+                        catch { }
+                        finally { p.Dispose(); }
+                    }
+                    if (!warmWatchSaid)
+                    {
+                        warmWatchSaid = true;
+                        app.Out($"\n可用内存只有 {free:N1} GB：已把预热进程优先级降到 BelowNormal（防止系统卡死）。\n", "bad");
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch { }
+        });
+    }
+    void StopWarmWatch()
+    {
+        var c = warmWatch;
+        if (c == null) return;
+        warmWatch = null;
+        try { c.Cancel(); } catch { }
+    }
+
+    // ---- (Victory) 自动查找游戏目录：顺序照 预热-火力全开.ps1 / 启动脚本 ----
+    // 启动器文件夹 → 它的上一级 → 启动器旁的 game-path.txt 第一行 → VICTORY_GAME_DIR →
+    // 常见路径 → 每个盘根目录下的 *GTA6* 文件夹；第一个含 game_scarlett_master.exe 的即命中。
+    static string? GameExeIn(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        try
+        {
+            var p = path.Trim().Trim('"');
+            if (p.Length == 0) return null;
+            if (File.Exists(p) && Path.GetFileName(p).Equals("game_scarlett_master.exe", StringComparison.OrdinalIgnoreCase))
+                return Path.GetFullPath(p);
+            var exe = Path.Combine(p, "game_scarlett_master.exe");
+            return File.Exists(exe) ? Path.GetFullPath(exe) : null;
+        }
+        catch { return null; }
+    }
+    static IEnumerable<string> GameCandidates()
+    {
+        yield return Bundled;
+        var parent = Path.GetDirectoryName(Bundled);
+        if (!string.IsNullOrEmpty(parent)) yield return parent;
+        var pathFile = Path.Combine(Bundled, "game-path.txt");
+        if (File.Exists(pathFile))
+        {
+            string? saved = null;
+            try { saved = File.ReadLines(pathFile).FirstOrDefault()?.Trim().Trim('"'); } catch { }
+            if (!string.IsNullOrWhiteSpace(saved)) yield return saved;
+        }
+        if (Environment.GetEnvironmentVariable("VICTORY_GAME_DIR") is { Length: > 0 } env) yield return env;
+        foreach (var known in new[] { @"E:\GTA6.Xbox.v1.0.2.1-CYBERLEEK", @"D:\GTA6.Xbox.v1.0.2.1-CYBERLEEK", @"C:\GTA6.Xbox.v1.0.2.1-CYBERLEEK" })
+            yield return known;
+        DriveInfo[] drives;
+        try { drives = DriveInfo.GetDrives(); } catch { yield break; }
+        foreach (var drive in drives.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            bool ready;
+            try { ready = drive.IsReady && drive.DriveType is (DriveType.Fixed or DriveType.Removable); } catch { continue; }
+            if (!ready) continue;
+            string[] dirs;
+            try { dirs = Directory.GetDirectories(drive.RootDirectory.FullName, "*GTA6*"); } catch { continue; }
+            Array.Sort(dirs, StringComparer.OrdinalIgnoreCase);
+            foreach (var dir in dirs) yield return dir;
+        }
+    }
+    public string? ScanGame()
+    {
+        foreach (var candidate in GameCandidates())
+            if (GameExeIn(candidate) is string exe) return exe;
+        return null;
+    }
+    // quiet: 启动时只填空，不覆盖玩家已选的游戏
+    public void FindGame(bool quiet = false)
+    {
+        string? exe = null;
+        try { exe = ScanGame(); } catch { }
+        if (exe == null)
+        {
+            if (quiet) return;
+            app.Out("\n自动查找没有找到游戏：文件夹里需要有 game_scarlett_master.exe。请点「浏览…」手动选择游戏。\n", "bad");
+            app.Post(new JsonObject { ["type"] = "findGame", ["ok"] = false, ["path"] = null });
+            return;
+        }
+        Set("game", exe);
+        app.Out($"\n已自动找到游戏：{exe}\n", "ok");
+        app.Post(new JsonObject { ["type"] = "findGame", ["ok"] = true, ["path"] = exe });
+        SendSettings();
     }
 
     // ---- Windows runs victory.exe itself; Linux runs it through Wine/Proton (Settings › Runner) ----
