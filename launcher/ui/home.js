@@ -45,7 +45,9 @@ function warmProgress() {
     const t = '这个版本已经预热完成';
     return { pct: 100, zero: true, line: t, value: '已准备', small: t };
   }
-  const pct = Math.min(100, Math.floor(100 * w.count / w.total));
+  // keep one decimal under 10%: 389/83549 is 0.47%, Math.floor made the panel look stuck at 0%
+  const rawPct = 100 * w.count / Math.max(1, w.total);
+  const pct = Math.min(100, rawPct < 10 ? Math.round(rawPct * 10) / 10 : Math.floor(rawPct));
   const left = warmLeft();
   const of = `${num(w.count)} / ${num(w.total)}`;
   return { pct, zero: false, line: `正在准备着色器 · ${pct}% · ${of}${left ? ' · ' + left : ''}`,
@@ -131,9 +133,9 @@ function renderHome() {
     const elapsed = JOB_T ? Math.max(1, Math.round((Date.now() - JOB_T) / 60000)) : 0;
     const left = warmLeft();
     const fill = $('#warmBigFill');
-    $('#warmBig').textContent = has ? pct + '%' : '准备中…';
+    $('#warmBig').textContent = has ? (pct < 10 && pct > 0 ? pct.toFixed(1) + '%' : pct + '%') : '准备中…';
     fill.classList.toggle('indet', !has);
-    fill.style.width = has ? pct + '%' : '100%';
+    fill.style.width = has ? Math.max(pct, 0.6) + '%' : '100%';   // keep a sliver visible at 0.x%
     const stage = String(job || '').replace(/^.*?预热着色器/, '').replace(/[（）()]/g, '').trim();
     $('#warmMeta').textContent = (has
       ? `${num(warm.count || 0)} / ${num(warm.total)} 条管线 · 已运行 ${elapsed} 分钟${left ? ' · 预计剩余 ' + left : ''}`
