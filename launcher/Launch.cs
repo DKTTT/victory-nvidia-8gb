@@ -857,6 +857,22 @@ sealed class Launch
                 if (val.Length == 0) env.Remove(kv.Key); else env[kv.Key] = val;
             }
         if (!B("thin", true)) env.Remove("VICTORY_THIN");
+        // (Victory) 显存感知的纹理预算：12G 以上不再用 92%，给 Streamline/DLSS 留显存（out of VRAM 会让 DLSS 保留旧帧 -> 闪烁）
+        try
+        {
+            string gpuName = "", drv = ""; long vramBytes = 0;
+            Gpu(ref gpuName, ref drv, ref vramBytes);
+            var gb = vramBytes / (1024.0 * 1024 * 1024);
+            if (gb >= 12 && env.TryGetValue("VICTORY_TEXTURE_ROOM_PERCENT", out var room) && room == "92")
+            {
+                var pct = gb >= 16 ? "65" : "75";
+                env["VICTORY_TEXTURE_ROOM_PERCENT"] = pct;
+                if (env.ContainsKey("VICTORY_CARD_ROOM_FOR_TARGETS_MB"))
+                    env["VICTORY_CARD_ROOM_FOR_TARGETS_MB"] = gb >= 16 ? "512" : "640";
+                notes?.Add($"显存 {gb:F0}G：纹理池限制到 {pct}%，给 DLSS/驱动留显存（修复 out of VRAM 闪烁）");
+            }
+        }
+        catch { }
         // (Victory) AMD/Intel: one submission ahead is the safer default (the device-removed reports were both vendors)
         if (Vendor() != "nvidia" && env.TryGetValue("VICTORY_RELAY", out var relay) && relay == "2")
         {
