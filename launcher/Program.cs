@@ -118,6 +118,7 @@ interface IDesktopHost
     void RevealExport(string path);
     string? PickFolder(string title);
     string? PickFile(string title, string pattern, string patternName);
+    bool Confirm(string title, string text);
     bool CustomFrame { get; }          // the page draws the title bar (Windows)
     void Window(string cmd);           // min, max, close from the page's own buttons
 }

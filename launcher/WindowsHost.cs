@@ -175,6 +175,9 @@ sealed class WindowsHost : Form, IDesktopHost
         return dialog.ShowDialog(this) == DialogResult.OK ? dialog.SelectedPath : null;
     }
 
+    public bool Confirm(string title, string text) =>
+        MessageBox.Show(this, text, title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+
     public string? PickFile(string title, string pattern, string patternName)
     {
         using var dialog = new OpenFileDialog { Title = title, Filter = $"{patternName}|{pattern}|所有文件 (*.*)|*.*" };

@@ -512,7 +512,7 @@ const SECTIONS = {
     row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '开始预热'}</button>`),
     // (Victory) the shader cache can be GBs: keep it off the C drive by default, and let the player move it
     row('缓存目录', '着色器/管线缓存（可达数 GB）。默认放在游戏所在盘；没有的话放在剩余空间最大的非 C 盘，只有单一 C 盘时才放 C 盘。换位置后需要重新预热。',
-      '<div class="acts"><button class="mini" data-act="pickCache">更改…</button><button class="mini" data-act="openCache">打开</button></div>', pathCode('cacheDir')),
+      `<div class="acts"><button class="mini" data-act="pickCache">更改…</button><button class="mini" data-act="openCache">打开</button><button class="mini" data-act="clearCache" ${S.running || job ? 'disabled' : ''}>清理…</button></div>`, pathCode('cacheDir')),
   ]],
   // (Victory) keyboard and mouse drive a stand-in pad while no controller is connected
   controls: () => ['操作', '更改将在下次开始游戏时生效。', [
@@ -684,6 +684,7 @@ document.addEventListener('click', (e) => {
     case 'logs': return send({ cmd: 'launch.openLogs' });
     case 'pickCache': return send({ cmd: 'launch.pickCache' });
     case 'openCache': return send({ cmd: 'launch.openCache' });
+    case 'clearCache': return send({ cmd: 'launch.clearCache' });
     case 'exportLogs': return send({ cmd: 'launch.exportLogs' });
     case 'doc': return send({ cmd: 'launch.openDoc', key: act.dataset.key });
     case 'saves': closeSettings(); return show('saves');

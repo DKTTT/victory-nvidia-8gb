@@ -299,6 +299,48 @@ sealed class Launch
             case "set":
                 foreach (var kv in m["values"]!.AsObject()) settings[kv.Key] = kv.Value?.DeepClone();
                 Save(); SendSettings(); break;
+            case "clearCache":
+            {
+                var dir = CacheDir(PayloadDir ?? Bundled);
+                var legacy = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VictoryLauncher");
+                var yes = (bool?)m["yes"] == true ||
+                          app.Host.Confirm("清理缓存", "删除着色器/管线缓存？\n\n" + dir + "\n\n可释放数 GB 空间，清理后需要重新预热。");
+                if (!yes) break;
+                long freed = 0;
+                var dirs = 0;
+                void Wipe(string? path)
+                {
+                    try
+                    {
+                        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+                        long size = 0;
+                        foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                            try { size += new FileInfo(f).Length; } catch { }
+                        Directory.Delete(path, true);
+                        freed += size;
+                        dirs++;
+                    }
+                    catch (Exception e) { app.Out("\n清理 " + path + " 失败：" + e.Message + "\n", "bad"); }
+                }
+                Wipe(dir);
+                // caches of older bundled launchers (payload-*/cache), the big one people still have on C
+                try
+                {
+                    foreach (var payload in Directory.GetDirectories(legacy, "payload-*"))
+                        Wipe(Path.Combine(payload, "cache"));
+                }
+                catch { }
+                // the warm record no longer matches an empty cache
+                foreach (var kv in history) if (kv.Value is JsonObject h)
+                {
+                    h.Remove("warmAt"); h.Remove("warmKey"); h.Remove("warmCount");
+                    h.Remove("warmFull"); h.Remove("warmTier"); h.Remove("warmJobs"); h.Remove("warmStale");
+                }
+                SaveHistory();
+                app.Out($"\n已清理缓存：{dirs} 个目录，释放 {freed / 1024.0 / 1024.0:F0} MB（下次开始需要重新预热）\n", "ok");
+                SendSettings();
+                break;
+            }
             case "pickCache":
                 if (app.Host.PickFolder("选择着色器缓存文件夹（换位置后需要重新预热）") is string cd && cd.Length > 0)
                 {

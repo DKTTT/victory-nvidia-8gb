@@ -525,3 +525,6 @@ select option { background: #15151A; color: #F8F5FF; }
 .starttext { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .starttext b { font-size: 14px; }
 .starttext small { color: var(--muted); font-size: 12px; }
+
+/* (Victory) three small buttons in one row (cache: change/open/clear) wrap instead of squeezing the path */
+.srow .acts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
