@@ -360,8 +360,8 @@ sealed class Launch
                     var t = raw.Trim();
                     if (t.Length == 0 || t.StartsWith("#")) { kept.Add(raw); continue; }
                     var eq = t.IndexOf('=');
-                    var key = (eq >= 0 ? t.Substring(0, eq) : t).Trim().ToUpperInvariant();
-                    if (Array.IndexOf(risky, key) >= 0) { dropped++; continue; }
+                    var envKey = (eq >= 0 ? t.Substring(0, eq) : t).Trim().ToUpperInvariant();
+                    if (Array.IndexOf(risky, envKey) >= 0) { dropped++; continue; }
                     kept.Add(raw);
                 }
                 if (dropped > 0)
