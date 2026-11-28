@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -69,6 +69,11 @@
                 <label for="dlssSel" class="sr">DLSS</label>
                 <select id="dlssSel" hidden></select>
                 <div class="setupcorner" id="setupCorner" hidden><span>需要设置</span><button class="setupbtn" id="setupBtn">去设置</button></div>
+              </div>
+              <div class="startpanel" id="startPanel" hidden>
+                <div class="spin" aria-hidden="true"></div>
+                <div class="starttext"><b id="startTitle">正在启动游戏…</b><small id="startText">已等待 0 秒</small></div>
+                <button class="ghostbtn" id="startCancel" style="height:40px">取消启动</button>
               </div>
               <div class="heronote" id="heroNote"></div>
             </div>

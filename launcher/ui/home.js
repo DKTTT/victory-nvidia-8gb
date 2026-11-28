@@ -28,6 +28,9 @@ let S = { settings: {}, history: {} };  // settings, running state, history
 let PC = null;                          // the PC checks
 let SV = null;                          // the save manager's list
 let job = null;                         // a step running (warm-up)
+// (Victory) a Play is starting: { t, step, detail } — disables the button and shows where it is
+let STARTING = null;
+let START_TICK = null;
 const freshWarm = () => ({ count: 0, secs: 0, total: null, samples: [] });
 let warm = freshWarm();                 // the warm-up's progress, from its output (total: "to make", null before it says)
 
@@ -91,8 +94,10 @@ function renderHome() {
   const gameOk = !!S.gameOk, filesOk = !!S.filesOk, running = !!S.running;
   const h = hist(), runs = h.runs || [], last = runs[runs.length - 1];
   const eye = $('#heroEye');
+  const starting = !!STARTING;
   eye.className = 'eyebrow';
-  if (running) eye.textContent = '游戏运行中';
+  if (starting) eye.textContent = '正在启动游戏';
+  else if (running) eye.textContent = '游戏运行中';
   else if (job) eye.textContent = '正在准备着色器';
   else if (!gameOk || !filesOk) eye.textContent = '';   // the bottom-right corner says it, with the Set up button
   else eye.textContent = '准备就绪';
@@ -101,9 +106,10 @@ function renderHome() {
 
   const play = $('#playBtn');
   play.classList.toggle('stop', running);
-  play.querySelector('span').textContent = running ? '停止' : '开始游戏';
+  play.classList.toggle('starting', starting);
+  play.querySelector('span').textContent = running ? '停止' : starting ? '启动中…' : '开始游戏';
   play.querySelector('svg').innerHTML = running ? '<rect x="6" y="6" width="12" height="12" rx="2"/>' : '<path d="M7 4l13 8-13 8z"/>';
-  play.disabled = !running && (!gameOk || !filesOk || !!job);
+  play.disabled = (starting && !running) || (!running && (!gameOk || !filesOk || !!job));
   $('#mode').value = st('seriesX', false) ? 'x' : 's';
   $('#mode').disabled = running;
   const warmBtn = $('#warmBtn');
@@ -123,6 +129,15 @@ function renderHome() {
   warmBtn.hidden = setup && !running && !job;
   renderDlssHome(setup && !running && !job);
   $('#hero').classList.toggle('needsetup', setup && !running && !job);
+  // (Victory) 启动中面板：灰色开始键 + 已等待秒数 + 当前步骤（窗口出现前 CPU 100% 属正常）
+  const sp = $('#startPanel');
+  if (sp) {
+    sp.hidden = !starting;
+    if (starting) {
+      $('#startTitle').textContent = STARTING.step || '正在启动游戏…';
+      $('#startText').textContent = STARTING.detail || `已等待 ${Math.round((Date.now() - STARTING.t) / 1000)} 秒`;
+    }
+  }
   navBadges();
   $('#setAlert').hidden = !setup;
   $('#heroNote').textContent = '';
@@ -378,6 +393,19 @@ function renderDlg() {
 }
 // ---------------- (Victory) Play before the shaders are prepared for this build ----------------
 const play = () => send({ cmd: 'launch.run', id: ID, overrides: st('ov:' + ID, {}), args: '' });
+// (Victory) 启动中的状态：立刻灰掉开始键，避免连点；窗口出现或进程结束后结束
+function beginStart() {
+  if (STARTING) return;
+  STARTING = { t: Date.now(), step: '正在启动内核进程…', detail: '' };
+  if (!START_TICK) START_TICK = setInterval(() => { if (STARTING) renderHome(); }, 1000);
+  renderHome();
+}
+function endStart() {
+  if (!STARTING) return;
+  STARTING = null;
+  if (START_TICK) { clearInterval(START_TICK); START_TICK = null; }
+  renderHome();
+}
 function openWarmDlg() {
   const mins = +(hist().warmMinutes || 0);
   const took = mins >= 1 ? `上次约 ${Math.round(mins)} 分钟` : mins > 0 ? '上次约 1 分钟' : '10 到 30 分钟';
@@ -581,13 +609,16 @@ document.addEventListener('click', (e) => {
 
   if (t.closest('#playBtn')) {
     if (S.running) return send({ cmd: 'launch.stop' });
+    if (STARTING) return;
     // (Victory) not warm for this build and these switches: ask first, unless told not to for this key
     if (S.shaderState && S.shaderState !== 'warm' && S.shaderState !== 'empty' && !(S.warmKeyNow && st('warmNoAsk', '') === S.warmKeyNow)) return openWarmDlg();
+    beginStart();
     return play();
   }
   if (t.closest('#warmPrep')) { warmDlgDone(); return send({ cmd: 'launch.warm', id: ID }); }
-  if (t.closest('#warmAnyway')) { warmDlgDone(); return play(); }
+  if (t.closest('#warmAnyway')) { warmDlgDone(); beginStart(); return play(); }
   if (t.closest('#warmClose')) return closeWarmDlg();
+  if (t.closest('#startCancel')) { endStart(); return send({ cmd: 'launch.stop' }); }
   // (Victory) 档位窗：选中一个再按「继续」才开始；取消什么都不做
   if (t.closest('#tierGo')) return tierSend();
   if (t.closest('#tierCancel')) return closeTierDlg();
@@ -716,6 +747,10 @@ window.vismReceive = (m) => {
       if (!$('#welcome').hidden) renderWelcome();
       maybeAskDlss();
       break;
+    case 'game':
+      if (m.state === 'end') endStart();
+      renderHome();
+      break;
     case 'job':
       if (m.state === 'start') { job = m.label; warm = freshWarm(); }
       else job = null;
@@ -732,6 +767,13 @@ window.vismReceive = (m) => {
       if ($('#settings').classList.contains('open')) renderSettings();
       break;
     case 'out': {
+      if (STARTING) {
+        const txt = String(m.text || '');
+        if (txt.includes('游戏窗口已出现')) { endStart(); break; }
+        const mm = /已等待\s*(\d+)\s*秒/.exec(txt);
+        if (mm) { STARTING.step = '正在加载游戏…'; STARTING.detail = `已等待 ${mm[1]} 秒（首次需翻译着色器，窗口出现前 CPU 占用高属正常）`; renderHome(); break; }
+        if (txt.includes('启动中')) { STARTING.step = '正在启动游戏…'; renderHome(); break; }
+      }
       // (Victory) the warm-up's lines (apps/victory/src/warm.rs): its first line
       // "<known> pipelines known, <n> made before (<fingerprint>), <n> bad; <to make> to make, <n> processes",
       // progress "<made> of <to make>, <seconds> s" (every two seconds), and "<made> made in <seconds> s (...)"
