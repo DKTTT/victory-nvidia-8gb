@@ -62,7 +62,7 @@ sealed class SaveLocations
     {
         var directory = GetSaveDirectory();
         if (windowsData != null) return directory ?? Path.Combine(windowsData, TitleId, "saves");
-        if (directory == null) throw new InvalidOperationException("Choose the VIctory save folder before loading a save.");
+        if (directory == null) throw new InvalidOperationException("载入存档前请先选择 Victory 存档文件夹。");
         return ValidateSelection(directory);
     }
 
@@ -80,13 +80,13 @@ sealed class SaveLocations
         if (!Path.GetFileName(fullPath).Equals("saves", StringComparison.OrdinalIgnoreCase) ||
             !Directory.Exists(Path.GetDirectoryName(fullPath)))
         {
-            throw new ArgumentException("Select VIctory's saves folder, or pass its path under an existing game directory with --save-dir.");
+            throw new ArgumentException("请选择 Victory 的存档文件夹，或通过 --save-dir 传入现有游戏目录下的路径。");
         }
         var profile = Path.TrimEndingDirectorySeparator(ProfileDirectory);
         if (fullPath.Equals(profile, StringComparison.Ordinal) || fullPath.StartsWith(profile + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            throw new ArgumentException("Choose the game's saves directory outside the kept saves library.");
+            throw new ArgumentException("请选择存档库之外的游戏存档目录。");
         if (Directory.Exists(fullPath) && (File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
-            throw new ArgumentException("Choose the actual saves folder instead of a symbolic link.");
+            throw new ArgumentException("请选择实际的存档文件夹，而不是符号链接。");
         return fullPath;
     }
 

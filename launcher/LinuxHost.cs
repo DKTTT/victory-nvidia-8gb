@@ -21,17 +21,17 @@ sealed class LinuxHost(bool test, string? saveDirectory) : IDesktopHost
         try
         {
             if (gtk_init_check(IntPtr.Zero, IntPtr.Zero) == 0)
-                throw new InvalidOperationException("A graphical Wayland or X11 session is required.");
+                throw new InvalidOperationException("需要图形化的 Wayland 或 X11 会话。");
             if (webkit_get_major_version() < 2 || (webkit_get_major_version() == 2 && webkit_get_minor_version() < 40))
-                throw new InvalidOperationException("WebKitGTK 4.1 version 2.40 or newer is required.");
+                throw new InvalidOperationException("需要 WebKitGTK 4.1（2.40 或更新版本）。");
         }
         catch (DllNotFoundException error)
         {
-            throw new InvalidOperationException("Install GTK3 and WebKitGTK 4.1 to launch the Linux build.", error);
+            throw new InvalidOperationException("请安装 GTK3 和 WebKitGTK 4.1 以启动 Linux 版。", error);
         }
 
         window = gtk_window_new(0);
-        gtk_window_set_title(window, App.Title + (test ? " (test profile)" : ""));
+        gtk_window_set_title(window, App.Title + (test ? "（测试配置）" : ""));
         gtk_window_set_default_size(window, 1280, 820);
         gtk_widget_set_size_request(window, 960, 600);
         // our own title bar, as on Windows: the page draws it and its buttons, and asks for moves and resizes
@@ -55,13 +55,13 @@ sealed class LinuxHost(bool test, string? saveDirectory) : IDesktopHost
         Connect(view, "decide-policy", new PolicyCallback(DecidePolicy));
         Connect(view, "load-failed", new LoadFailedCallback((_, _, _, _, _) =>
         {
-            Console.Error.WriteLine(App.Title + ": could not load the bundled interface.");
+            Console.Error.WriteLine(App.Title + "：无法加载内置界面。");
             return 0;
         }));
         var manager = webkit_web_view_get_user_content_manager(view);
         Connect(manager, "script-message-received::vism", new MessageCallback(Receive));
         if (webkit_user_content_manager_register_script_message_handler(manager, "vism") == 0)
-            throw new InvalidOperationException("Could not register the WebKit message channel.");
+            throw new InvalidOperationException("无法注册 WebKit 消息通道。");
 
         gtk_widget_show_all(window);
         webkit_web_view_load_uri(view, page);
@@ -130,12 +130,12 @@ sealed class LinuxHost(bool test, string? saveDirectory) : IDesktopHost
         return 0;
     };
 
-    public string? ChooseExport(string filename) => ChooseFiles("Share this save as a zip", 1,
+    public string? ChooseExport(string filename) => ChooseFiles("将此存档分享为 zip", 1,
         Environment.GetFolderPath(Environment.SpecialFolder.Desktop), filename).FirstOrDefault();
 
-    public string[] ChooseImports() => ChooseFiles("Import GTA VI saves", 0, multi: true);
+    public string[] ChooseImports() => ChooseFiles("导入 GTA VI 存档", 0, multi: true);
 
-    public string? ChooseSaveFolder(string? current) => ChooseFiles("Select the VIctory saves folder", 2,
+    public string? ChooseSaveFolder(string? current) => ChooseFiles("选择 Victory 存档文件夹", 2,
         current ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)).FirstOrDefault();
 
     public void RevealExport(string path)
@@ -186,10 +186,10 @@ sealed class LinuxHost(bool test, string? saveDirectory) : IDesktopHost
     public string? PickFile(string title, string pattern, string patternName) => ChooseFiles(title, 0, pattern: pattern, patternName: patternName).FirstOrDefault();
 
     string[] ChooseFiles(string title, int action, string? directory = null, string? filename = null, bool multi = false,
-        string? pattern = "*.[zZ][iI][pP]", string patternName = "Save archives (*.zip)")
+        string? pattern = "*.[zZ][iI][pP]", string patternName = "存档压缩包 (*.zip)")
     {
         var dialog = gtk_file_chooser_native_new(title, window, action,
-            action == 1 ? "Save" : action == 2 ? "Select" : "Open", "Cancel");
+            action == 1 ? "保存" : action == 2 ? "选择" : "打开", "取消");
         try
         {
             gtk_file_chooser_set_select_multiple(dialog, multi ? 1 : 0);

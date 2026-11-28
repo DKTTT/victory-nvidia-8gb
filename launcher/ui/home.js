@@ -16,10 +16,10 @@ function ago(iso) {
   const t = Date.parse(String(iso).replace(' ', 'T'));
   if (!t) return '';
   const m = (Date.now() - t) / 60000;
-  if (m < 1) return 'just now';
-  if (m < 60) return Math.round(m) + ' min ago';
-  if (m < 48 * 60) return Math.round(m / 60) + ' h ago';
-  return Math.round(m / 1440) + ' days ago';
+  if (m < 1) return '刚刚';
+  if (m < 60) return Math.round(m) + ' 分钟前';
+  if (m < 48 * 60) return Math.round(m / 60) + ' 小时前';
+  return Math.round(m / 1440) + ' 天前';
 }
 
 const ID = 'public';
@@ -41,7 +41,7 @@ function warmProgress() {
   }
   const pct = Math.min(100, Math.floor(100 * w.count / w.total));
   const left = warmLeft();
-  const of = `${num(w.count)} of ${num(w.total)}`;
+  const of = `${num(w.count)} / ${num(w.total)}`;
   return { pct, zero: false, line: `正在准备着色器 · ${pct}% · ${of}${left ? ' · ' + left : ''}`,
     value: `预热中 · ${pct}%`, small: left ? `${of} · ${left}` : of };
 }
@@ -58,11 +58,11 @@ function warmLeft() {
   const first = s[i];
   if (last.t - first.t < 5 || last.c <= first.c) return '';
   const secs = (warm.total - last.c) / ((last.c - first.c) / (last.t - first.t));
-  if (secs < 60) return 'under a minute left';
+  if (secs < 60) return '不到 1 分钟';
   const m = Math.round(secs / 60);
-  if (m < 60) return `about ${m} min left`;
+  if (m < 60) return `约 ${m} 分钟`;
   const h = Math.floor(m / 60), r = m % 60;
-  return `about ${h} h${r ? ' ' + r + ' min' : ''} left`;
+  return `约 ${h} 小时${r ? ' ' + r + ' 分钟' : ''}`;
 }
 // the bars: filled to the percentage once there is one, the moving stripe before
 function fillBars(pct) {
@@ -92,24 +92,24 @@ function renderHome() {
   const h = hist(), runs = h.runs || [], last = runs[runs.length - 1];
   const eye = $('#heroEye');
   eye.className = 'eyebrow';
-  if (running) eye.textContent = 'PLAYING';
+  if (running) eye.textContent = '游戏运行中';
   else if (job) eye.textContent = '正在准备着色器';
   else if (!gameOk || !filesOk) eye.textContent = '';   // the bottom-right corner says it, with the Set up button
-  else eye.textContent = 'READY TO PLAY';
+  else eye.textContent = '准备就绪';
   $('#hero').classList.toggle('playing', running);
-  $('#heroSub').textContent = gameOk && filesOk ? `Your dump · ${folder(st('game', ''))}` : '';
+  $('#heroSub').textContent = gameOk && filesOk ? `你的游戏 · ${folder(st('game', ''))}` : '';
 
   const play = $('#playBtn');
   play.classList.toggle('stop', running);
-  play.querySelector('span').textContent = running ? '停止' : '开始';
+  play.querySelector('span').textContent = running ? '停止' : '开始游戏';
   play.querySelector('svg').innerHTML = running ? '<rect x="6" y="6" width="12" height="12" rx="2"/>' : '<path d="M7 4l13 8-13 8z"/>';
   play.disabled = !running && (!gameOk || !filesOk || !!job);
   $('#mode').value = st('seriesX', false) ? 'x' : 's';
   $('#mode').disabled = running;
   const warmBtn = $('#warmBtn');
-  warmBtn.textContent = job ? 'Cancel' : '预热着色器';
+  warmBtn.textContent = job ? '取消' : '预热着色器';
   warmBtn.disabled = running || (!job && (!gameOk || !filesOk || S.shaderState === 'empty'));
-  warmBtn.title = !job && S.shaderState === 'empty' ? 'Play once first: the game lists its shaders the first time it runs' : '';
+  warmBtn.title = !job && S.shaderState === 'empty' ? '请先玩一次：游戏首次运行时会列出它的着色器' : '';
   $('#warmBar').hidden = !job;
   const wp = warmProgress();
   $('#warmText').textContent = wp.line;
@@ -128,26 +128,26 @@ function renderHome() {
 
   // cards
   const c = (id, v, s, cls = '') => { $(id).textContent = v; $(id).className = 'v ' + cls; $(id + 'S').textContent = s; };
-  if (last) c('#cSession', last.minutes < 1 ? 'Under a minute' : `${last.minutes} min`,
-    `${ago(last.start)} · ${last.stopped ? 'stopped' : last.code === 0 ? 'no crash' : 'crashed (' + crash(last.code) + ')'}`, last.stopped || last.code === 0 ? '' : 'warn');
+  if (last) c('#cSession', last.minutes < 1 ? '不到 1 分钟' : `${last.minutes} 分钟`,
+    `${ago(last.start)} · ${last.stopped ? '已手动停止' : last.code === 0 ? '未崩溃' : '崩溃（' + crash(last.code) + '）'}`, last.stopped || last.code === 0 ? '' : 'warn');
   else c('#cSession', '还没有', '点开始游戏');
   // (Victory) the host judges the warm-up against this game build and the translator's switches
   // and, when it could ask (victory.exe warm --count), by how many are still to make: under 1,000 is warm
   const ss = S.shaderState, n = typeof S.toMake === 'number' ? S.toMake : null;
-  const warmSub = () => (h.warmAt ? (st('warmCount', 0) ? `${num(st('warmCount', 0))} shaders ready · ${ago(h.warmAt)}` : `ready · ${ago(h.warmAt)}`) : 'nothing much to prepare')
-    + (n > 0 ? ` · ${num(n)} small ones are made as you play` : '');
-  const toDo = n !== null ? `${num(n)} shaders to prepare` : '';
+  const warmSub = () => (h.warmAt ? (st('warmCount', 0) ? `${num(st('warmCount', 0))} 个着色器就绪 · ${ago(h.warmAt)}` : `已就绪 · ${ago(h.warmAt)}`) : '无需再准备什么')
+    + (n > 0 ? ` · 还有 ${num(n)} 个小项会在游玩时生成` : '');
+  const toDo = n !== null ? `有 ${num(n)} 个着色器待准备` : '';
   if (job) c('#cShaders', wp.value, wp.small, 'ok');
   // a new PC: the game lists its shaders the first time it runs, so there is nothing to warm before that
-  else if (ss === 'empty') c('#cShaders', '未预热', 'Play once so the game lists its shaders, then warm them here');
+  else if (ss === 'empty') c('#cShaders', '未预热', '先玩一次，让游戏列出着色器，再在这里预热');
   else if (ss === 'warm' && n !== null) c('#cShaders', '已预热', warmSub(), 'ok');
-  else if (!h.warmAt) c('#cShaders', '未预热', toDo ? `${toDo}: warm it once for a smooth first run` : '预热一次，首局更顺');
-  else if (h.warmCode !== 0) c('#cShaders', 'Failed', 'Try 预热着色器 again', 'bad');
-  else if (ss === 'build') c('#cShaders', '需要重新预热', toDo ? `New game build · ${toDo}` : 'New game build: warm again', 'warn');
-  else if (ss === 'flags') c('#cShaders', '需要重新预热', toDo ? `Settings changed · ${toDo}` : 'Settings changed: warm again', 'warn');
-  else if (ss === 'out') c('#cShaders', '需要重新预热', toDo || 'Warm again', 'warn');
+  else if (!h.warmAt) c('#cShaders', '未预热', toDo ? `${toDo}：预热一次，首局更顺` : '预热一次，首局更顺');
+  else if (h.warmCode !== 0) c('#cShaders', '预热失败', '请重试预热着色器', 'bad');
+  else if (ss === 'build') c('#cShaders', '需要重新预热', toDo ? `游戏版本已更新 · ${toDo}` : '游戏版本已更新：请重新预热', 'warn');
+  else if (ss === 'flags') c('#cShaders', '需要重新预热', toDo ? `设置已更改 · ${toDo}` : '设置已更改：请重新预热', 'warn');
+  else if (ss === 'out') c('#cShaders', '需要重新预热', toDo || '请重新预热', 'warn');
   else c('#cShaders', '已预热', warmSub(), 'ok');
-  if (PC) c('#cPc', PC.gpu || 'Graphics card', [PC.driver && '驱动 ' + PC.driver, PC.vram && gb(PC.vram)].filter(Boolean).join(' · ') || 'details unavailable');
+  if (PC) c('#cPc', PC.gpu || '显卡', [PC.driver && '驱动 ' + PC.driver, PC.vram && gb(PC.vram)].filter(Boolean).join(' · ') || '详细信息不可用');
 
   renderChecks();
   renderSaveTiles();
@@ -162,8 +162,8 @@ function checksList() {
   if (PC) {
     if (PC.gpu && /Intel|UHD|Iris|Vega|Basic Render/i.test(PC.gpu)) L.push(['显卡', [`${PC.gpu} · 可能是核显`, 'bad']]);
   if (PC.vram) L.push(['显存', PC.vram >= 15e9 ? [gb(PC.vram), 'ok'] : [`${gb(PC.vram)} · ${saverOn() ? '省显存开' : '建议开省显存'}`, saverOn() ? 'ok' : 'warn']]);
-    if (PC.ram) L.push(['可用内存', PC.ramFree >= 16e9 ? [`${gb(PC.ramFree)} 可用`, 'ok'] : [`16 GB needed · ${gb(PC.ramFree)} 可用`, 'warn']]);
-    if (PC.disk >= 0) L.push(['Disk space', PC.disk >= 10e9 ? ['OK', 'ok'] : [`${gb(PC.disk)} free`, 'warn']]);
+    if (PC.ram) L.push(['可用内存', PC.ramFree >= 16e9 ? [`${gb(PC.ramFree)} 可用`, 'ok'] : [`需要 16 GB · ${gb(PC.ramFree)} 可用`, 'warn']]);
+    if (PC.disk >= 0) L.push(['磁盘空间', PC.disk >= 10e9 ? ['充足', 'ok'] : [`${gb(PC.disk)} 可用`, 'warn']]);
   }
   return L;
 }
@@ -174,18 +174,18 @@ function renderChecks() {
 function renderSaveTiles() {
   const box = $('#saveTiles');
   if (!SV) { box.innerHTML = ''; return; }
-  const mine = SV.spots.filter((s) => !s.auto).slice(0, 2).map((s, i) => ({ ...s, label: i === 0 ? `latest · ${ago(s.kept)}` : ago(s.kept) }));
-  const team = SV.team.slice(0, 3 - mine.length).map((s) => ({ ...s, label: 'team save' }));
+  const mine = SV.spots.filter((s) => !s.auto).slice(0, 2).map((s, i) => ({ ...s, label: i === 0 ? `最新 · ${ago(s.kept)}` : ago(s.kept) }));
+  const team = SV.team.slice(0, 3 - mine.length).map((s) => ({ ...s, label: '团队存档' }));
   box.innerHTML = [...mine, ...team].map((s, i) => `<button class="st${i === 0 && mine.length ? ' cur' : ''}" data-view="saves"><b>${esc(s.name)}</b><div>${esc(s.label)}</div></button>`).join('')
-    + '<button class="st add" id="importTile">+ Import a save</button>';
+    + '<button class="st add" id="importTile">+ 导入存档</button>';
 }
 
 // ---------------- this release ----------------
-const verText = () => REL.version ? 'v' + REL.version : REL.commit ? 'build ' + REL.commit : '';
+const verText = () => REL.version ? 'v' + REL.version : REL.commit ? '构建 ' + REL.commit : '';
 function renderRelease() {
   $('#heroVer').textContent = verText();
   // the version is always on the home screen: a release's number, a team build's commit, or "dev build"
-  $('#verPill').textContent = REL.version ? verText() + ' · release' : verText() || 'dev build';
+  $('#verPill').textContent = REL.version ? verText() + ' · 正式版' : verText() || '开发版';
 }
 
 // ---------------- saves page (the save manager) ----------------
@@ -193,28 +193,28 @@ function renderSaves(m) {
   SV = m;
   $('#chooseSaveFolder').hidden = !m.canChooseSaveFolder;
   $('#savePath').hidden = !m.canChooseSaveFolder;
-  $('#savePath').textContent = m.saveDirectory || 'Select the game’s saves folder to load a save.';
+  $('#savePath').textContent = m.saveDirectory || '选择游戏的存档文件夹以载入存档。';
   $('#svNow').innerHTML = m.found
-    ? `<div class="sv-row"><div><b>Current game save</b><span>Last written ${esc(m.newest)} · ${fmtSize(m.size)}</span></div>
-        ${m.running ? '<span class="warn">game running: loading is off until you close it</span>' : ''}
-        <button class="mini ghost" data-sv="share" data-kind="current">Share</button></div>`
-    : '<div class="sv-row"><div><b>No save yet</b><span>Play until the game autosaves, or load a saved spot below.</span></div></div>';
+    ? `<div class="sv-row"><div><b>当前游戏存档</b><span>最后写入 ${esc(m.newest)} · ${fmtSize(m.size)}</span></div>
+        ${m.running ? '<span class="warn">游戏正在运行：关闭后才能载入</span>' : ''}
+        <button class="mini ghost" data-sv="share" data-kind="current">分享</button></div>`
+    : '<div class="sv-row"><div><b>还没有存档</b><span>先玩到游戏自动保存，或在下方载入一个存档点。</span></div></div>';
   $('#svNote').textContent = m.note || '';
   $('#svNote').classList.toggle('bad', m.ok === false);
   $$('[data-sv="fresh"]').forEach((x) => { x.disabled = !!m.running; });
   const row = (s, kind) => `<li class="sv-item${s.auto ? ' auto' : ''}${kind === 'team' ? ' team' : ''}">
-      <div class="sv-nm"><b>${esc(s.name)}</b><span>${s.note ? esc(s.note) + ' · ' : ''}game saved ${esc(s.gameTime)} · ${fmtSize(s.size)}</span></div>
+      <div class="sv-nm"><b>${esc(s.name)}</b><span>${s.note ? esc(s.note) + ' · ' : ''}游戏内保存 ${esc(s.gameTime)} · ${fmtSize(s.size)}</span></div>
       <div class="acts">
-        <button class="mini" data-sv="load" data-kind="${kind}" data-name="${esc(s.name)}" ${m.running ? 'disabled title="Close the game first"' : ''}>Load</button>
-        <button class="mini ghost" data-sv="share" data-kind="${kind}" data-name="${esc(s.name)}">Share</button>
-        ${kind === 'spot' ? `<button class="mini ghost" data-sv="delete" data-name="${esc(s.name)}">Delete</button>` : ''}
+        <button class="mini" data-sv="load" data-kind="${kind}" data-name="${esc(s.name)}" ${m.running ? 'disabled title="请先关闭游戏"' : ''}>载入</button>
+        <button class="mini ghost" data-sv="share" data-kind="${kind}" data-name="${esc(s.name)}">分享</button>
+        ${kind === 'spot' ? `<button class="mini ghost" data-sv="delete" data-name="${esc(s.name)}">删除</button>` : ''}
       </div></li>`;
   const mine = m.spots.filter((s) => !s.auto), autos = m.spots.filter((s) => s.auto);
   $('#svList').innerHTML =
-    (m.team.length ? `<div class="ogroup">Team saves</div><ul class="sv-list">${m.team.map((s) => row(s, 'team')).join('')}</ul>` : '')
-    + '<div class="ogroup">Your spots and imports</div>'
-    + (mine.length ? `<ul class="sv-list">${mine.map((s) => row(s, 'spot')).join('')}</ul>` : '<p class="sub">None yet. Name your current save above, or import one.</p>')
-    + (autos.length ? `<div class="ogroup">Automatic backups (before each load, the last 5)</div><ul class="sv-list">${autos.map((s) => row(s, 'spot')).join('')}</ul>` : '');
+    (m.team.length ? `<div class="ogroup">团队存档</div><ul class="sv-list">${m.team.map((s) => row(s, 'team')).join('')}</ul>` : '')
+    + '<div class="ogroup">你的存档点与导入</div>'
+    + (mine.length ? `<ul class="sv-list">${mine.map((s) => row(s, 'spot')).join('')}</ul>` : '<p class="sub">还没有。请在上方为当前存档命名，或导入一个。</p>')
+    + (autos.length ? `<div class="ogroup">自动备份（每次载入前，保留最近 5 个）</div><ul class="sv-list">${autos.map((s) => row(s, 'spot')).join('')}</ul>` : '');
   renderSaveTiles();
 }
 function armed(btn, label) {
@@ -247,7 +247,7 @@ function closeSettings() {
 }
 
 // a red ! where set-up needs something: on the setting itself and on its section in the menu
-const bang = '<span class="bang" title="Needs attention" aria-label="Needs attention">!</span>';
+const bang = '<span class="bang" title="需要注意" aria-label="需要注意">!</span>';
 function navBadges() {
   const general = !S.gameOk || !S.filesOk;
   $$('.sn').forEach((b) => {
@@ -266,24 +266,24 @@ const pathCode = (key) => st(key, '') ? `<code>${esc(st(key, ''))}</code>` : '';
 let SL = null;   // the last word from Get NVIDIA's files (progress, done, error)
 function nvidiaRows() {
   const gen = PC.rtx, fg = +st('framegen', 0), dlss = !!st('dlss', false), sl = S.sl || {};
-  const opts = [[0, 'Off'], [1, '2x'], [2, '3x'], [3, '4x'], [5, '6x']];
-  const seg = `<div class="seg" role="radiogroup" aria-label="Frame generation">${opts.map(([n, l]) =>
+  const opts = [[0, '关闭'], [1, '2x'], [2, '3x'], [3, '4x'], [5, '6x']];
+  const seg = `<div class="seg" role="radiogroup" aria-label="帧生成">${opts.map(([n, l]) =>
     `<button data-fg="${n}" class="${fg === n ? 'on' : ''}" ${n > 0 && (gen < 40 || (n > 1 && gen < 50)) ? 'disabled' : ''}>${l}</button>`).join('')}</div>`;
   const busy = !!sl.busy || SL?.state === 'progress';
   const wanted = fg > 0 || dlss;
   const ready = (fg === 0 || sl.frameOk) && (!dlss || sl.dlssOk);
   const status = SL ? `<small class="${SL.state === 'done' ? 'ok' : SL.state === 'error' ? 'bad' : ''}">${esc(SL.text)}</small>`
     : !wanted ? ''
-    : ready ? `<small class="ok">NVIDIA-signed files ready in ${esc(sl.dir)}</small>`
-    : `<small class="warn">Not there yet: until they are, Play runs without DLSS.</small>`;
+    : ready ? `<small class="ok">NVIDIA 签名文件已就绪，位于 ${esc(sl.dir)}</small>`
+    : `<small class="warn">尚未就绪：就绪前开始游戏将不启用 DLSS。</small>`;
   return [
-    row('Frame generation (DLSS)', gen >= 50 ? `Frames DLSS makes between two of the game’s (${esc(PC.gpu)}: up to 6x)`
-      : gen >= 40 ? `Frames DLSS makes between two of the game’s (${esc(PC.gpu)}: 2x; more needs an RTX 50)` : `Needs an RTX 40 or 50 card (yours: ${esc(PC.gpu)})`, seg),
-    row('DLSS upscaling', 'DLSS takes over the game’s own upscaler; the FidelityFX DLL above is then not used', tog('dlss', dlss, 'DLSS upscaling')),
-    row('Get NVIDIA’s files', '从 NVIDIA 的 GitHub 下载 Streamline SDK（276 MB），保留 10–67 MB 在 <code>%LOCALAPPDATA%\\Victory\\streamline</code>; a DLL is kept only if NVIDIA signed it. Only when you press the button.',
-      `<button class="mini" data-act="getSl" ${busy || S.running ? 'disabled' : ''}>${busy ? 'Working…' : ready && wanted ? 'Check again' : 'Get NVIDIA’s files'}</button>`, status),
-    row('Or a folder of your own', 'A folder that already holds NVIDIA’s Streamline DLLs (sl.interposer.dll and the others); each must be signed by NVIDIA',
-      `<div class="acts"><button class="mini" data-pickdir="streamlineDir" data-title="A folder with NVIDIA’s Streamline DLLs">Choose…</button>${st('streamlineDir', '') ? '<button class="mini ghost" data-clear="streamlineDir">Clear</button>' : ''}</div>`,
+    row('帧生成（DLSS）', gen >= 50 ? `DLSS 在游戏两帧之间生成的帧数（${esc(PC.gpu)}：最高 6 倍）`
+      : gen >= 40 ? `DLSS 在游戏两帧之间生成的帧数（${esc(PC.gpu)}：2 倍；更高需要 RTX 50）` : `需要 RTX 40 或 50 显卡（你的显卡：${esc(PC.gpu)}）`, seg),
+    row('DLSS 超分辨率', 'DLSS 将接管游戏自带的超分；此时上面的 FidelityFX DLL 不再使用', tog('dlss', dlss, 'DLSS 超分辨率')),
+    row('获取 NVIDIA 文件', '从 NVIDIA 的 GitHub 下载 Streamline SDK（276 MB），在 <code>%LOCALAPPDATA%\\Victory\\streamline</code> 中只保留 10–67 MB；只有经 NVIDIA 签名的 DLL 才会保留。仅在你按下按钮时进行。',
+      `<button class="mini" data-act="getSl" ${busy || S.running ? 'disabled' : ''}>${busy ? '处理中…' : ready && wanted ? '重新检查' : '获取 NVIDIA 文件'}</button>`, status),
+    row('或使用你自己的文件夹', '已包含 NVIDIA Streamline DLL 的文件夹（sl.interposer.dll 等）；每个文件都必须由 NVIDIA 签名',
+      `<div class="acts"><button class="mini" data-pickdir="streamlineDir" data-title="包含 NVIDIA Streamline DLL 的文件夹">选择…</button>${st('streamlineDir', '') ? '<button class="mini ghost" data-clear="streamlineDir">清除</button>' : ''}</div>`,
       pathCode('streamlineDir')),
   ];
 }
@@ -298,8 +298,8 @@ const dlssPct = () => SL?.total ? Math.min(100, Math.floor(100 * (SL.got || 0) /
 // frames generated (framegen) on RTX 40 and 50, above 2x on RTX 50 only; upscaling on or off on RTX 20 and 30
 function dlssChoices() {
   const g = rtxGen();
-  if (g < 40) return [['off', 'Off'], ['up', 'Upscaling']];
-  return [[0, 'Off'], [1, '2x'], ...(g >= 50 ? [[2, '3x'], [3, '4x'], [5, '6x']] : [])].map(([n, l]) => [String(n), l]);
+  if (g < 40) return [['off', '关闭'], ['up', '超分辨率']];
+  return [[0, '关闭'], [1, '2x'], ...(g >= 50 ? [[2, '3x'], [3, '4x'], [5, '6x']] : [])].map(([n, l]) => [String(n), l]);
 }
 function dlssValue() {
   const g = rtxGen();
@@ -324,7 +324,7 @@ function renderDlssHome(hide) {
   sel.hidden = !g || hide || !ready;
   if (!g) return;
   btn.disabled = busy || !!S.running;
-  btn.textContent = busy ? `DLSS ${dlssPct()}%` : 'Get DLSS';
+  btn.textContent = busy ? `DLSS ${dlssPct()}%` : '获取 DLSS';
   const opts = dlssChoices().map(([v, l]) => `<option value="${v}">DLSS · ${l}</option>`).join('');
   if (opts !== dlssOpts) { sel.innerHTML = opts; dlssOpts = opts; }
   sel.value = dlssValue();
@@ -339,20 +339,20 @@ function renderDlg() {
   let text = '', body = '', foot = '';
   if (dlg === 'ask') {
     text = '要下载 DLSS 吗？它带来 DLSS 超分和帧生成（RTX 40 为 2 倍，RTX 50 最高 6 倍帧）。文件来自 NVIDIA 官方 GitHub：下载 276 MB，保留 67 MB。不会上传你的任何信息。'
-      + (PC?.gpu ? ` Your card: ${esc(PC.gpu)}.` : '');
-    foot = '<button class="ghostbtn plain" id="dlssLater">Not now</button><button class="primary lg" id="dlssGo">Download</button>';
+      + (PC?.gpu ? ` 你的显卡：${esc(PC.gpu)}。` : '');
+    foot = '<button class="ghostbtn plain" id="dlssLater">暂不</button><button class="primary lg" id="dlssGo">下载</button>';
   } else if (dlg === 'run') {
     text = esc(SL?.text || '启动中…');
     body = `<div class="progress"><span>${dlssPct()}%</span></div>`;
-    foot = '<button class="ghostbtn plain" id="dlssClose">Hide</button>';
+    foot = '<button class="ghostbtn plain" id="dlssClose">隐藏</button>';
   } else if (dlg === 'choose') {
-    text = (SL?.text ? `<span class="ok">${esc(SL.text)}</span> ` : '') + (g >= 40 ? 'Frame generation:' : 'DLSS upscaling:');
+    text = (SL?.text ? `<span class="ok">${esc(SL.text)}</span> ` : '') + (g >= 40 ? '帧生成：' : 'DLSS 超分辨率：');
     body = `<div class="seg" role="radiogroup" aria-label="DLSS">${dlssChoices().map(([v, l]) =>
       `<button data-dfg="${v}" class="${dlssValue() === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
-    foot = '<button class="primary lg" id="dlssDone">Done</button>';
+    foot = '<button class="primary lg" id="dlssDone">完成</button>';
   } else if (dlg === 'error') {
-    text = `<span class="bad">${esc(SL?.text || 'The download failed.')}</span>`;
-    foot = '<button class="ghostbtn plain" id="dlssClose">Close</button><button class="primary lg" id="dlssGo">Try again</button>';
+    text = `<span class="bad">${esc(SL?.text || '下载失败。')}</span>`;
+    foot = '<button class="ghostbtn plain" id="dlssClose">关闭</button><button class="primary lg" id="dlssGo">重试</button>';
   }
   $('#dlssText').innerHTML = text;
   $('#dlssBody').innerHTML = body;
@@ -362,12 +362,12 @@ function renderDlg() {
 const play = () => send({ cmd: 'launch.run', id: ID, overrides: st('ov:' + ID, {}), args: '' });
 function openWarmDlg() {
   const mins = +(hist().warmMinutes || 0);
-  const took = mins >= 1 ? `about ${Math.round(mins)} minutes last time` : mins > 0 ? 'about a minute last time' : '10 to 30 minutes';
-  const why = S.shaderState === 'build' ? 'This is a new game build. '
-    : S.shaderState === 'flags' ? 'The settings changed since the last warm-up. '
-    : S.shaderState === 'failed' ? 'The last warm-up failed. ' : '';
-  const many = typeof S.toMake === 'number' ? `${num(S.toMake)} shaders are still to prepare. ` : '';
-  $('#warmDlgText').textContent = `${why}${many}The first minutes will stutter and show dark or black areas while the shaders are made during play. Preparing them first takes a while (${took}).`;
+  const took = mins >= 1 ? `上次约 ${Math.round(mins)} 分钟` : mins > 0 ? '上次约 1 分钟' : '10 到 30 分钟';
+  const why = S.shaderState === 'build' ? '这是新的游戏版本。'
+    : S.shaderState === 'flags' ? '自上次预热后设置已更改。'
+    : S.shaderState === 'failed' ? '上次预热失败。' : '';
+  const many = typeof S.toMake === 'number' ? `还有 ${num(S.toMake)} 个着色器待准备。` : '';
+  $('#warmDlgText').textContent = `${why}${many}游玩时如果边玩边生成着色器，最初几分钟会卡顿，并出现暗区或黑块。先预热需要一些时间（${took}）。`;
   $('#warmNoAsk').checked = false;
   $('#warmDlg').hidden = false;
 }
@@ -385,42 +385,42 @@ function maybeAskDlss() {
   openDlg('ask');
 }
 const SECTIONS = {
-  general: () => ['通用', 'Your game and GTA6 CN · Victory.', [
-    row((S.gameOk ? '' : bang) + '游戏文件', S.gameOk ? '<span class="ok">game_scarlett_master.exe found</span>' : 'The folder of your own Xbox Series dump', '<button class="mini" data-pick="game">Choose…</button>', pathCode('game')),
+  general: () => ['通用', '你的游戏与 GTA6 CN · Victory。', [
+    row((S.gameOk ? '' : bang) + '游戏文件', S.gameOk ? '<span class="ok">已找到 game_scarlett_master.exe</span>' : '你自己 Xbox Series 转储中的文件夹', '<button class="mini" data-pick="game">选择…</button>', pathCode('game')),
     // only for a launcher that isn't inside a release (testing from a build): a normal install never shows this
-    ...(S.bundled ? [] : [row(S.filesOk ? '启动器文件' : bang + '<span class="bad">GTA6 CN · Victory files not found</span>',
-      'The launcher normally sits in the GTA6 CN · Victory folder. This one doesn’t, so point it at the Victory folder.',
-      `<div class="acts"><button class="mini" data-pickdir="neptuneDir">Choose…</button></div>`, pathCode('neptuneDir'))]),
-    ...(A.os === 'linux' ? [row('Runner', 'How victory.exe is started on Linux: wine, or a Proton command such as <code>umu-run</code>',
+    ...(S.bundled ? [] : [row(S.filesOk ? '启动器文件' : bang + '<span class="bad">未找到 GTA6 CN · Victory 文件</span>',
+      '启动器通常位于 GTA6 CN · Victory 文件夹中。当前启动器不在该位置，请将其指向 Victory 文件夹。',
+      `<div class="acts"><button class="mini" data-pickdir="neptuneDir">选择…</button></div>`, pathCode('neptuneDir'))]),
+    ...(A.os === 'linux' ? [row('运行器', '在 Linux 上如何启动 victory.exe：wine，或 Proton 命令（如 <code>umu-run</code>）',
       `<input class="field runner" data-text="wine" value="${esc(st('wine', ''))}" placeholder="wine" spellcheck="false">`)] : []),
-    row('Set up again', 'Shows the welcome steps again', '<button class="mini" data-act="welcome">Open</button>'),
+    row('重新设置', '再次显示欢迎步骤', '<button class="mini" data-act="welcome">打开</button>'),
   ]],
-  graphics: () => ['画面', 'Changes apply the next time you press Play.', [
-    row('Mode', 'Fast: Series S, the game’s own resolution and upscaler. Sharp: Series X, slower.',
-      `<div class="seg" role="radiogroup" aria-label="Mode"><button data-mode="s" class="${st('seriesX', false) ? '' : 'on'}">Fast</button><button data-mode="x" class="${st('seriesX', false) ? 'on' : ''}">Sharp</button></div>`),
-    row('Save video memory', `For graphics cards under 16 GB${PC?.vram ? ` (yours: ${gb(PC.vram)})` : ''}. Warm the shaders again after changing it.`, tog('saver', saverOn(), 'Save video memory')),
+  graphics: () => ['画面', '更改将在下次开始游戏时生效。', [
+    row('模式', '快速：Series S，使用游戏自带分辨率和超分。清晰：Series X，速度较慢。',
+      `<div class="seg" role="radiogroup" aria-label="模式"><button data-mode="s" class="${st('seriesX', false) ? '' : 'on'}">快速</button><button data-mode="x" class="${st('seriesX', false) ? 'on' : ''}">清晰</button></div>`),
+    row('节省显存', `适用于 16 GB 以下的显卡${PC?.vram ? `（你的显卡：${gb(PC.vram)}）` : ''}。更改后请重新预热着色器。`, tog('saver', saverOn(), '节省显存')),
     // the title's FidelityFX upscaler needs a PC DLL the player brings (nothing of AMD's ships with Victory)
-    row('Upscaler DLL (FidelityFX)', S.dlssOn ? 'Not used while DLSS upscaling is on.'
-      : 'A PC <code>amd_fidelityfx_upscaler_dx12.dll</code> of your own: the game’s upscaler runs on it. Without it the game’s upscaler is refused.',
-      `<div class="acts"><button class="mini" data-pickfile="fsrDll">Choose…</button>${st('fsrDll', '') ? '<button class="mini ghost" data-clear="fsrDll">Clear</button>' : ''}</div>`,
-      pathCode('fsrDll') + (st('fsrDll', '') && S.fsrOk === false ? '<small class="bad">That file is gone.</small>' : '')),
+    row('超分 DLL（FidelityFX）', S.dlssOn ? '开启 DLSS 超分时不使用。'
+      : '你自己的 PC 版 <code>amd_fidelityfx_upscaler_dx12.dll</code>：游戏自带超分依赖它。没有它，游戏自带超分将无法启用。',
+      `<div class="acts"><button class="mini" data-pickfile="fsrDll">选择…</button>${st('fsrDll', '') ? '<button class="mini ghost" data-clear="fsrDll">清除</button>' : ''}</div>`,
+      pathCode('fsrDll') + (st('fsrDll', '') && S.fsrOk === false ? '<small class="bad">该文件已不存在。</small>' : '')),
     ...(A.os === 'windows' && PC?.rtx >= 20 ? nvidiaRows() : []),
   ]],
-  performance: () => ['性能', 'What happens around each run.', [
-    row('Extra draw threads', 'Spreads the game’s drawing over more of your CPU (recommended)', tog('thin', st('thin', true), 'Extra draw threads')),
-    row('预热线程数', `How many shaders are prepared at once. All ${S.cores || ''} is fastest; half (the default) uses less memory and keeps your PC usable.`,
-      `<div class="seg" role="radiogroup" aria-label="Warm-up threads">${[['half', S.warmJobsDefault], ['all', S.cores]].map(([k, n]) => `<button data-jobs="${n}" class="${(st('warmJobs', 0) || S.warmJobsDefault) == n ? 'on' : ''}">${k === 'half' ? 'Half' : 'All'} (${n})</button>`).join('')}</div>`),
-    row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '已预热'}</button>`),
+  performance: () => ['性能', '每次运行时的相关设置。', [
+    row('额外绘制线程', '把游戏的绘制任务分摊到更多 CPU 核心（推荐）', tog('thin', st('thin', true), '额外绘制线程')),
+    row('预热线程数', `同时预热多少个着色器。全部 ${S.cores || ''} 个最快；一半（默认）占用更少内存，电脑仍可正常使用。`,
+      `<div class="seg" role="radiogroup" aria-label="预热线程数">${[['half', S.warmJobsDefault], ['all', S.cores]].map(([k, n]) => `<button data-jobs="${n}" class="${(st('warmJobs', 0) || S.warmJobsDefault) == n ? 'on' : ''}">${k === 'half' ? '一半' : '全部'} (${n})</button>`).join('')}</div>`),
+    row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '开始预热'}</button>`),
   ]],
   // (Victory) keyboard and mouse drive a stand-in pad while no controller is connected
-  controls: () => ['Controls', 'Changes apply the next time you press Play.', [
+  controls: () => ['操作', '更改将在下次开始游戏时生效。', [
   ]],
   saves: () => ['存档', '所有版本共用同一个存档目录。', [
-    row('Save manager', 'Keep spots, load them, share and import saves', '<button class="mini" data-act="saves">Open</button>'),
-    row('Open the save folder', 'Where your kept spots are', '<button class="mini" data-act="saveFolder">Open</button>'),
+    row('存档管理', '保留存档点、载入、分享和导入存档', '<button class="mini" data-act="saves">打开</button>'),
+    row('打开存档文件夹', '你保留的存档点所在位置', '<button class="mini" data-act="saveFolder">打开</button>'),
   ]],
-  logs: () => ['日志与问题报告', 'Every run writes a log. Send it with a bug report.', [
-    row('Logs folder', 'The last run’s full output', '<button class="mini" data-act="logs">Open</button>'),
+  logs: () => ['日志与问题报告', '每次运行都会写入日志。提交问题报告时请一并发送。', [
+    row('日志文件夹', '上次运行的完整输出', '<button class="mini" data-act="logs">打开</button>'),
   ]],
 };
 function renderSettings(animate) {
@@ -430,12 +430,12 @@ function renderSettings(animate) {
   const main = $('#setMain');
   if (q) {
     const rows = Object.values(SECTIONS).flatMap((f) => f()[2]).filter((r) => r.includes('data-search="') && r.split('data-search="')[1].split('"')[0].includes(q));
-    main.innerHTML = `<div><h1>Search</h1><p class="lead">${rows.length} setting${rows.length === 1 ? '' : 's'} for “${esc(q)}”</p></div>`
-      + (rows.length ? `<div class="group">${rows.join('')}</div>` : '<div class="empty">Nothing matches.</div>');
+    main.innerHTML = `<div><h1>搜索</h1><p class="lead">找到 ${rows.length} 项与“${esc(q)}”相关的设置</p></div>`
+      + (rows.length ? `<div class="group">${rows.join('')}</div>` : '<div class="empty">没有匹配项。</div>');
   } else {
     const [title, lead, rows] = SECTIONS[section]();
     main.innerHTML = `<div><h1>${title}</h1><p class="lead">${lead}</p></div><div class="group">${rows.join('')}</div>`
-      + (section === 'graphics' ? '<div class="hintbox"><b>Presets are coming.</b> The team is deciding which switch sets players get; the mode and memory saver above already use the team’s tuned set.</div>' : '');
+      + (section === 'graphics' ? '<div class="hintbox"><b>预设即将推出。</b>团队正在确定为玩家提供哪些开关组合；上方的模式和显存节省已使用团队调好的设置。</div>' : '');
   }
   if (animate) { main.classList.remove('swap'); void main.offsetWidth; main.classList.add('swap'); }
 }
@@ -467,37 +467,37 @@ function renderWelcome() {
   $$('.wpage').forEach((p, i) => p.classList.toggle('away', i !== step));
   const g = st('game', '');
   $('#w0').innerHTML = `
-    <div><label>Game</label><div class="sub">Your own Xbox Series dump: pick its game_scarlett_master.exe</div>
-      <div class="pick"><div class="field${g ? '' : ' empty'}">${g ? esc(folder(g)) : 'No folder chosen'}</div><button data-pick="game">Browse…</button></div></div>
-    ${S.filesOk ? '' : `<div><label class="bad">GTA6 CN · Victory files not found</label><div class="sub">The launcher normally sits in the GTA6 CN · Victory folder, next to victory.exe. This one doesn’t: point it at the Victory folder.</div>
-      <div class="pick"><div class="field empty">No folder chosen</div><button data-pickdir="neptuneDir">Browse…</button></div></div>`}
+    <div><label>游戏</label><div class="sub">你自己的 Xbox Series 转储：选择其中的 game_scarlett_master.exe</div>
+      <div class="pick"><div class="field${g ? '' : ' empty'}">${g ? esc(folder(g)) : '未选择文件夹'}</div><button data-pick="game">浏览…</button></div></div>
+    ${S.filesOk ? '' : `<div><label class="bad">未找到 GTA6 CN · Victory 文件</label><div class="sub">启动器通常位于 GTA6 CN · Victory 文件夹中，与 victory.exe 相邻。当前启动器不在该位置：请将其指向 Victory 文件夹。</div>
+      <div class="pick"><div class="field empty">未选择文件夹</div><button data-pickdir="neptuneDir">浏览…</button></div></div>`}
     <div class="checklist">
-      ${S.gameOk ? ck('y', 'Game found: game_scarlett_master.exe') : ck(g ? 'x' : 'i', g ? 'That file isn’t game_scarlett_master.exe' : 'Pick the game’s exe in your dump')}
-      ${S.filesOk ? ck('y', 'GTA6 CN · Victory files found') : ck('x', 'GTA6 CN · Victory files missing')}
-      ${ck('i', 'Supported version: newer game updates may not work yet')}
+      ${S.gameOk ? ck('y', '已找到游戏：game_scarlett_master.exe') : ck(g ? 'x' : 'i', g ? '该文件不是 game_scarlett_master.exe' : '在你的转储中选择游戏的 exe')}
+      ${S.filesOk ? ck('y', '已找到 GTA6 CN · Victory 文件') : ck('x', '缺少 GTA6 CN · Victory 文件')}
+      ${ck('i', '支持的版本：更新的游戏更新可能尚不可用')}
     </div>`;
   const vram = PC?.vram || 0;
-  $('#w1').innerHTML = !PC ? '<div class="checklist">' + ck('i', 'Looking at your PC…') + '</div>' : `
+  $('#w1').innerHTML = !PC ? '<div class="checklist">' + ck('i', '正在检查你的电脑…') + '</div>' : `
     <div class="checklist">
-      ${ck(PC.gpu ? 'y' : 'i', `Graphics card: ${esc(PC.gpu || 'not found')}`, [PC.driver && 'driver ' + esc(PC.driver), vram && gb(vram)].filter(Boolean).join(' · '))}
-      ${vram ? (vram >= 15e9 ? ck('y', 'Video memory: enough for the full setting') : ck('n', 'Video memory under 16 GB: the memory saver is on for you', 'Settings › Graphics')) : ''}
-      ${PC.ram ? (PC.ram >= 30e9 ? ck('y', `Memory: ${gb(PC.ram)}`) : ck('n', `Memory: ${gb(PC.ram)}`, 'the game uses about 14 GB: close other apps while playing')) : ''}
-      ${PC.disk >= 0 ? (PC.disk >= 10e9 ? ck('y', `Disk: ${gb(PC.disk)} free`) : ck('n', `Disk: only ${gb(PC.disk)} free`, 'the shader cache needs a few GB')) : ''}
-      ${ck('i', `Processor: ${PC.cpu} threads`)}
+      ${ck(PC.gpu ? 'y' : 'i', `显卡：${esc(PC.gpu || '未找到')}`, [PC.driver && '驱动 ' + esc(PC.driver), vram && gb(vram)].filter(Boolean).join(' · '))}
+      ${vram ? (vram >= 15e9 ? ck('y', '显存：足够使用完整设置') : ck('n', '显存低于 16 GB：已为你开启显存节省', '设置 › 画面')) : ''}
+      ${PC.ram ? (PC.ram >= 30e9 ? ck('y', `内存：${gb(PC.ram)}`) : ck('n', `内存：${gb(PC.ram)}`, '游戏约占用 14 GB：游玩时请关闭其他应用')) : ''}
+      ${PC.disk >= 0 ? (PC.disk >= 10e9 ? ck('y', `磁盘：${gb(PC.disk)} 可用`) : ck('n', `磁盘：仅剩 ${gb(PC.disk)} 可用`, '着色器缓存需要几个 GB')) : ''}
+      ${ck('i', `处理器：${PC.cpu} 线程`)}
     </div>`;
   const h = hist(), wpw = warmProgress();
   $('#w2').innerHTML = `
-    <div><label>Prepare the shaders</label><div class="sub">GTA6 CN · Victory turns the game’s shaders into ones your graphics card understands. Doing it now takes about 10 minutes and uses all of your CPU (fans will spin up); after that, the first run doesn’t stutter or show dark areas. You can also skip it and do it later from the home screen.</div></div>
+    <div><label>准备着色器</label><div class="sub">GTA6 CN · Victory 会将游戏的着色器转译成你的显卡能理解的版本。现在进行约需 10 分钟，并会占满所有 CPU（风扇会全速运转）；之后首次运行不会卡顿，也不会出现暗区。你也可以跳过，之后在主页进行。</div></div>
     <div class="checklist">
-      ${job ? ck(wpw.zero ? 'y' : 'i', wpw.zero ? wpw.line : wpw.pct !== null ? `Preparing… ${wpw.pct}%` : '准备中…', wpw.zero ? '' : wpw.pct !== null ? wpw.small : '')
-        : S.shaderState === 'warm' ? ck('y', '着色器已就绪', st('warmCount', 0) ? num(st('warmCount', 0)) + ' shaders' : '')
-        : S.shaderState === 'empty' ? ck('i', 'Nothing to prepare yet', 'play once so the game lists its shaders, then warm them here')
-        : ck('i', 'Not prepared yet')}
+      ${job ? ck(wpw.zero ? 'y' : 'i', wpw.zero ? wpw.line : wpw.pct !== null ? `准备中… ${wpw.pct}%` : '准备中…', wpw.zero ? '' : wpw.pct !== null ? wpw.small : '')
+        : S.shaderState === 'warm' ? ck('y', '着色器已就绪', st('warmCount', 0) ? num(st('warmCount', 0)) + ' 个着色器' : '')
+        : S.shaderState === 'empty' ? ck('i', '暂无需准备', '先玩一次让游戏列出着色器，再在这里预热')
+        : ck('i', '尚未预热')}
     </div>
-    ${job ? '<div class="progress"><div class="bar"><i></i></div></div>' : `<div><button class="primary lg" data-act="warm" ${S.gameOk && S.filesOk && S.shaderState !== 'empty' ? '' : 'disabled'}>Prepare now</button></div>`}`;
+    ${job ? '<div class="progress"><div class="bar"><i></i></div></div>' : `<div><button class="primary lg" data-act="warm" ${S.gameOk && S.filesOk && S.shaderState !== 'empty' ? '' : 'disabled'}>立即预热</button></div>`}`;
   fillBars(job ? wpw.pct : null);
   const next = $('#wNext');
-  next.textContent = step < 2 ? 'Continue' : 'Start playing';
+  next.textContent = step < 2 ? '继续' : '开始游戏';
   next.disabled = step === 0 && !(S.gameOk && S.filesOk);
   requestAnimationFrame(fitWelcome);
 }
@@ -536,7 +536,7 @@ document.addEventListener('click', (e) => {
   const dfg = t.closest('[data-dfg]'); if (dfg) return dlssChoose(dfg.dataset.dfg);
 
   const pk = t.closest('[data-pick]'); if (pk) return send({ cmd: 'launch.pickGame' });
-  const pd = t.closest('[data-pickdir]'); if (pd) return send({ cmd: 'launch.pickFolder', key: pd.dataset.pickdir, title: pd.dataset.title || (pd.dataset.pickdir === 'neptuneDir' ? 'The GTA6 CN · Victory folder' : 'The OptiScaler folder') });
+  const pd = t.closest('[data-pickdir]'); if (pd) return send({ cmd: 'launch.pickFolder', key: pd.dataset.pickdir, title: pd.dataset.title || (pd.dataset.pickdir === 'neptuneDir' ? 'GTA6 CN · Victory 文件夹' : 'OptiScaler 文件夹') });
   const fgb = t.closest('[data-fg]'); if (fgb) { set({ framegen: +fgb.dataset.fg }); SL = null; return renderSettings(); }
   const pf = t.closest('[data-pickfile]'); if (pf) return send({ cmd: 'launch.pickFile', key: pf.dataset.pickfile });
   const cl = t.closest('[data-clear]'); if (cl) { set({ [cl.dataset.clear]: '' }); return renderSettings(); }
@@ -564,15 +564,15 @@ document.addEventListener('click', (e) => {
   const li = t.closest('.steps li'); if (li && +li.dataset.step < step) { step = +li.dataset.step; return renderWelcome(); }
 
   // saves
-  if (t.closest('#importBtn') || t.closest('#importTile')) { $('#svNote').textContent = 'Pick the zip file(s)…'; return send({ cmd: 'import' }); }
+  if (t.closest('#importBtn') || t.closest('#importTile')) { $('#svNote').textContent = '选择 zip 文件…'; return send({ cmd: 'import' }); }
   if (t.closest('#openFolder')) return send({ cmd: 'openFolder' });
   if (t.closest('#chooseSaveFolder')) return send({ cmd: 'chooseSaveFolder' });
   const sv = t.closest('[data-sv]');
   if (sv && !sv.disabled) {
     const { sv: a, kind, name } = sv.dataset;
-    if (a === 'load' && armed(sv, 'Replace current?')) { $('#svNote').textContent = 'Loading…'; send({ cmd: 'load', name, kind }); }
-    if (a === 'delete' && armed(sv, 'Sure?')) send({ cmd: 'delete', name });
-    if (a === 'fresh' && armed(sv, 'Clear the story?')) { $('#svNote').textContent = 'Clearing…'; send({ cmd: 'fresh' }); }
+    if (a === 'load' && armed(sv, '替换当前存档？')) { $('#svNote').textContent = '正在载入…'; send({ cmd: 'load', name, kind }); }
+    if (a === 'delete' && armed(sv, '确定？')) send({ cmd: 'delete', name });
+    if (a === 'fresh' && armed(sv, '清空剧情？')) { $('#svNote').textContent = '正在清除…'; send({ cmd: 'fresh' }); }
     if (a === 'share') send({ cmd: 'share', name, kind });
   }
 });
@@ -591,7 +591,7 @@ document.addEventListener('keydown', (e) => {
 $('#svForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const n = $('#svName').value.trim();
-  if (!n) { $('#svNote').textContent = 'Give the save a name first.'; return; }
+  if (!n) { $('#svNote').textContent = '请先给存档起个名字。'; return; }
   send({ cmd: 'snap', name: n });
   $('#svName').value = '';
 });

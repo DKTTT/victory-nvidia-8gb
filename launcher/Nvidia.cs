@@ -39,11 +39,11 @@ static class Streamline
     // why `dir` can't serve these files (the first one missing or not NVIDIA's), or null when it can
     public static string? Missing(string dir, IEnumerable<string> files)
     {
-        if (dir.Length == 0 || !Directory.Exists(dir)) return $"no folder {dir}";
+        if (dir.Length == 0 || !Directory.Exists(dir)) return $"没有文件夹 {dir}";
         foreach (var f in files)
         {
             var path = Path.Combine(dir, f);
-            if (!File.Exists(path)) return $"{f} is not in {dir}";
+            if (!File.Exists(path)) return $"{dir} 中没有 {f}";
             if (Check(path) is string why) return why;
         }
         return null;
@@ -54,7 +54,7 @@ static class Streamline
     public static string? Check(string path)
     {
         var info = new FileInfo(path);
-        if (!info.Exists) return $"{info.Name} is not there";
+        if (!info.Exists) return $"{info.Name} 不存在";
         lock (checkedFiles)
             if (checkedFiles.TryGetValue(path, out var c) && c.size == info.Length && c.at == info.LastWriteTimeUtc) return c.why;
         var why = Verify(path);
@@ -67,7 +67,7 @@ static class Streamline
     {
         var name = Path.GetFileName(path);
         var code = WinTrust.Verify(path);
-        if (code != 0) return $"{name} is not validly signed (0x{code:X8})";
+        if (code != 0) return $"{name} 未通过有效签名校验（0x{code:X8}）";
         string subject;
         try
         {
@@ -77,11 +77,11 @@ static class Streamline
 #pragma warning restore SYSLIB0057
             subject = cert.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.SimpleName, false);
         }
-        catch (Exception e) { return $"{name}: its signer could not be read ({e.Message})"; }
-        return IsNvidia(subject) ? null : $"{name} is signed by \"{subject}\", not by {Signer}";
+        catch (Exception e) { return $"{name}：无法读取签名者（{e.Message}）"; }
+        return IsNvidia(subject) ? null : $"{name} 的签名者是“{subject}”，而非 {Signer}";
     }
 #else
-    static string? Verify(string path) => "NVIDIA's DLLs are checked on Windows only";
+    static string? Verify(string path) => "NVIDIA 的 DLL 仅在 Windows 上校验";
 #endif
     public static bool IsNvidia(string? subject) => (subject ?? "").Trim() == Signer;
 
@@ -99,19 +99,19 @@ static class Streamline
             app.Post(new JsonObject { ["type"] = "sl", ["state"] = state, ["text"] = text, ["got"] = got, ["total"] = ZipSize });
         try
         {
-            if (Missing(dir, need) == null) { Say("done", $"NVIDIA's files are already in {dir}, signed by {Signer}."); return; }
+            if (Missing(dir, need) == null) { Say("done", $"NVIDIA 文件已在 {dir}，由 {Signer} 签名。"); return; }
             Directory.CreateDirectory(dir);
             // a new, empty folder for the download, apart from what is kept
             work = Path.Combine(Path.GetDirectoryName(dir)!, "streamline-download-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(work);
             var zip = Path.Combine(work, "streamline-sdk-v2.14.16.zip");
-            Say("progress", "Connecting to github.com…");
+            Say("progress", "正在连接 github.com…");
             using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(60) })
             using (var req = new HttpRequestMessage(HttpMethod.Get, Url))
             {
                 req.Headers.UserAgent.ParseAdd("ProjectNeptuneVI");
                 using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
-                if (!res.IsSuccessStatusCode) { Say("error", $"GitHub answered {(int)res.StatusCode}: nothing was downloaded."); return; }
+                if (!res.IsSuccessStatusCode) { Say("error", $"GitHub 返回 {(int)res.StatusCode}：未下载任何内容。"); return; }
                 using var from = await res.Content.ReadAsStreamAsync();
                 using var to = File.Create(zip);
                 using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -120,16 +120,16 @@ static class Streamline
                 for (int n; (n = await from.ReadAsync(buf)) > 0;)
                 {
                     got += n;
-                    if (got > ZipSize) { Say("error", "The download is larger than NVIDIA's release: stopped, nothing kept."); return; }
+                    if (got > ZipSize) { Say("error", "下载内容大于 NVIDIA 的发布包：已停止，未保留任何文件。"); return; }
                     sha.AppendData(buf, 0, n);
                     await to.WriteAsync(buf.AsMemory(0, n));
-                    if (Environment.TickCount64 - shown > 400) { shown = Environment.TickCount64; Say("progress", $"Downloading NVIDIA's Streamline SDK · {got >> 20} of {ZipSize >> 20} MB", got); }
+                    if (Environment.TickCount64 - shown > 400) { shown = Environment.TickCount64; Say("progress", $"正在下载 NVIDIA Streamline SDK · {got >> 20} / {ZipSize >> 20} MB", got); }
                 }
-                if (got != ZipSize) { Say("error", $"The download ended at {got:N0} of {ZipSize:N0} bytes: nothing kept."); return; }
+                if (got != ZipSize) { Say("error", $"下载在 {got:N0} / {ZipSize:N0} 字节处结束：未保留任何文件。"); return; }
                 var hash = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
-                if (hash != ZipSha256) { Say("error", "The download's SHA-256 is not NVIDIA's release's: nothing kept."); return; }
+                if (hash != ZipSha256) { Say("error", "下载的 SHA-256 与 NVIDIA 发布包不符：未保留任何文件。"); return; }
             }
-            Say("progress", "Checking NVIDIA's signatures…", ZipSize);
+            Say("progress", "正在校验 NVIDIA 签名…", ZipSize);
             var kept = new List<string>(); var refused = new List<string>();
             using (var archive = ZipFile.OpenRead(zip))
                 foreach (var f in need)
@@ -140,7 +140,7 @@ static class Streamline
                         var p = e.FullName.Replace('\\', '/');
                         return p.Equals("bin/x64/" + f, StringComparison.OrdinalIgnoreCase) || p.EndsWith("/bin/x64/" + f, StringComparison.OrdinalIgnoreCase);
                     });
-                    if (entry == null) { refused.Add($"{f} (not in the SDK)"); continue; }
+                    if (entry == null) { refused.Add($"{f}（不在 SDK 中）"); continue; }
                     var fresh = Path.Combine(work, f);
                     entry.ExtractToFile(fresh, true);
                     if (Check(fresh) is string why) { File.Delete(fresh); refused.Add(why); continue; }
@@ -148,10 +148,10 @@ static class Streamline
                     kept.Add(f);
                 }
             long size = kept.Sum(f => new FileInfo(Path.Combine(dir, f)).Length);
-            if (refused.Count > 0) Say("error", $"Kept {kept.Count} of NVIDIA's files in {dir}; refused: {string.Join("; ", refused)}.");
-            else Say("done", $"Ready: {kept.Count} NVIDIA-signed files, {size / 1048576.0:F1} MB, in {dir}. The download was deleted.");
+            if (refused.Count > 0) Say("error", $"已在 {dir} 保留 {kept.Count} 个 NVIDIA 文件；拒绝：{string.Join("；", refused)}。");
+            else Say("done", $"就绪：{kept.Count} 个 NVIDIA 签名文件，{size / 1048576.0:F1} MB，位于 {dir}。下载文件已删除。");
         }
-        catch (Exception e) { Say("error", e is TaskCanceledException ? "GitHub stopped answering: nothing kept." : "Couldn’t get NVIDIA's files: " + e.Message); }
+        catch (Exception e) { Say("error", e is TaskCanceledException ? "GitHub 停止响应：未保留任何文件。" : "无法获取 NVIDIA 的文件：" + e.Message); }
         finally
         {
             if (work != null) try { Directory.Delete(work, true); } catch { }

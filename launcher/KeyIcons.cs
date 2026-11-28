@@ -79,10 +79,10 @@ static class KeyIcons
         try
         {
             var rpf = new FileInfo(Path.Combine(gameDir, "data.rpf"));
-            if (!rpf.Exists) { notes.Add($"keyboard prompt icons: no data.rpf beside the game in {gameDir}: the game shows pad buttons"); return null; }
+            if (!rpf.Exists) { notes.Add($"键盘提示图标：游戏所在的 {gameDir} 旁没有 data.rpf：游戏将显示手柄按键"); return null; }
             string? fontPath = null; Font? font = null;
             foreach (var p in Fonts()) if (Usable(p) is Font f) { fontPath = p; font = f; break; }
-            if (font == null) { notes.Add($"keyboard prompt icons: none of these fonts is there with the letters ({string.Join(", ", Fonts())}): the game shows pad buttons"); return null; }
+            if (font == null) { notes.Add($"键盘提示图标：以下字体均不存在，无法显示字母（{string.Join("、", Fonts())}）：游戏将显示手柄按键"); return null; }
             var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Neptune");
             var gfx = Path.Combine(dir, "input_icons_kbm.gfx");
             var side = Path.Combine(dir, "input_icons_kbm.txt");
@@ -92,22 +92,22 @@ static class KeyIcons
             var exeTime = exe != null && File.Exists(exe) ? File.GetLastWriteTimeUtc(exe) : DateTime.MinValue;
             if (File.Exists(gfx) && File.Exists(side) && File.ReadAllText(side).Trim() == from && File.GetLastWriteTimeUtc(gfx) >= exeTime)
             {
-                notes.Add($"keyboard prompt icons: {gfx} (made from your data.rpf, font {Path.GetFileName(fontPath)})");
+                notes.Add($"键盘提示图标：{gfx}（由你的 data.rpf 制作，字体 {Path.GetFileName(fontPath)}）");
                 return gfx;
             }
             byte[] retail;
             try { retail = ReadRetail(rpf.FullName); }
-            catch (Exception e) { notes.Add($"keyboard prompt icons: no retail input_icons movie in data.rpf at {RetailOffset} ({e.Message}; another game version?): the game shows pad buttons"); return null; }
+            catch (Exception e) { notes.Add($"键盘提示图标：data.rpf 在偏移 {RetailOffset} 处没有正式版 input_icons 影片（{e.Message}；游戏版本不同？）：游戏将显示手柄按键"); return null; }
             var movie = Build(retail, font!, RetailSize);
             Directory.CreateDirectory(dir);
             var tmp = gfx + ".new";
             File.WriteAllBytes(tmp, movie);
             File.Move(tmp, gfx, true);
             File.WriteAllText(side, from);
-            notes.Add($"keyboard prompt icons: made {gfx} from your data.rpf (font {Path.GetFileName(fontPath)}, {movie.Length} bytes)");
+            notes.Add($"键盘提示图标：已由你的 data.rpf 制作 {gfx}（字体 {Path.GetFileName(fontPath)}，{movie.Length} 字节）");
             return gfx;
         }
-        catch (Exception e) { notes.Add($"keyboard prompt icons not made ({e.Message}): the game shows pad buttons"); return null; }
+        catch (Exception e) { notes.Add($"键盘提示图标未生成（{e.Message}）：游戏将显示手柄按键"); return null; }
     }
 
     // the retail movie: a zlib stream at RetailOffset, inflated (at most 1 MB from 256 KB read)
@@ -127,7 +127,7 @@ static class KeyIcons
         var retail = outp.ToArray();
         if (retail.Length > 1 << 20) retail = retail[..(1 << 20)];
         if (retail.Length < 9 || retail[0] != 'G' || retail[1] != 'F' || retail[2] != 'X' || BitConverter.ToUInt32(retail, 4) != retail.Length)
-            throw new InvalidDataException("no GFX movie at that offset");
+            throw new InvalidDataException("该偏移处没有 GFX 影片");
         return retail;
     }
 
@@ -169,7 +169,7 @@ static class KeyIcons
                 int off = (int)U32(d, b + 4 + i * 8 + 4);
                 if (((pid == 3 && eid == 1) || (pid == 0 && eid == 3) || (pid == 0 && eid == 4)) && U16(d, b + off) == 4) return b + off;
             }
-            throw new InvalidDataException("font has no Unicode format-4 cmap");
+            throw new InvalidDataException("字体没有 Unicode format-4 cmap");
         }
         public int Glyph(char ch)
         {
@@ -186,7 +186,7 @@ static class KeyIcons
                     return g != 0 ? (g + delta) & 0xFFFF : 0;
                 }
             }
-            throw new InvalidDataException($"font lacks '{ch}'");
+            throw new InvalidDataException($"字体缺少“{ch}”");
         }
         public int Advance(int gid) => U16(d, t["hmtx"] + 4 * Math.Min(gid, nHmetrics - 1));
 
@@ -201,8 +201,8 @@ static class KeyIcons
             if (a == b) return outp;
             int off = glyf + (int)a;
             int n = S16(d, off);
-            if (n < 0) throw new InvalidDataException($"composite glyph {gid} is not supported");
-            if (n == 0) throw new InvalidDataException($"glyph {gid} has no contours");
+            if (n < 0) throw new InvalidDataException($"不支持复合字形 {gid}");
+            if (n == 0) throw new InvalidDataException($"字形 {gid} 没有轮廓");
             var ends = new int[n];
             for (int i = 0; i < n; i++) ends[i] = U16(d, off + 10 + 2 * i);
             int p = off + 10 + 2 * n;
@@ -534,11 +534,11 @@ static class KeyIcons
                 "mouse" => "plain", "mouse_up" => "up", "mouse_down" => "down", "mouse_left" => "left", "mouse_right" => "right",
                 "mouse_updown" => "updown", "mouse_leftright" => "leftright", "mouse_left_click" => "lclick", "mouse_right_click" => "rclick",
                 "mouse_middle" => "middle", "mouse_scroll_up" => "scrollup", "mouse_scroll_down" => "scrolldown",
-                _ => throw new InvalidDataException($"no art for {name}"),
+                _ => throw new InvalidDataException($"没有 {name} 的图形"),
             };
             return MouseKey(mode);
         }
-        throw new InvalidDataException($"no art for {name}");
+        throw new InvalidDataException($"没有 {name} 的图形");
     }
 
     // ---- SWF encoding ----
@@ -700,13 +700,13 @@ static class KeyIcons
                 if (code == 39) spriteHeader[cid] = pl[2] | (pl[3] << 8);
             }
         var missing = exports.Where(x => !spriteHeader.ContainsKey(x.id)).ToList();
-        if (missing.Count > 0) throw new InvalidDataException("exports that are not sprites: " + string.Join(", ", missing.Select(x => x.id)));
+        if (missing.Count > 0) throw new InvalidDataException("存在非精灵导出：" + string.Join("、", missing.Select(x => x.id)));
         int nextId = maxId + 1;
         var art = new Dictionary<int, byte[]>();
         foreach (var (cid, name) in exports)
         {
             int n = int.Parse(name[(name.LastIndexOf('_') + 1)..], System.Globalization.CultureInfo.InvariantCulture);
-            if (!Buttons.TryGetValue(n, out var button)) throw new InvalidDataException($"no keyboard icon for {name}");
+            if (!Buttons.TryGetValue(n, out var button)) throw new InvalidDataException($"没有 {name} 的键盘图标");
             var (w, layers) = IconLayers(font, button);
             double sx = K, tx = SlotOffset(w * K);
             var shapes = new List<byte>(); var places = new List<byte>();
@@ -738,7 +738,7 @@ static class KeyIcons
         long total = 8 + stage.Length + body.Count;
         if (size is int sz)
         {
-            if (total > sz) throw new InvalidDataException($"movie is {total} bytes, more than the {sz} the title reads");
+            if (total > sz) throw new InvalidDataException($"影片为 {total} 字节，超过游戏可读取的 {sz}");
             body.AddRange(new byte[sz - total]);
             total = sz;
         }

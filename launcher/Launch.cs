@@ -118,24 +118,24 @@ sealed class Launch
         if (frames == 0 && !dlss) return false;
         var gen = Rtx();
         string? why = null;
-        if (!OperatingSystem.IsWindows()) why = "NVIDIA's files are checked on Windows only";
-        else if (gen < 20) why = "no NVIDIA RTX card found";
-        if (why == null && frames > 0 && gen < 40) { notes.Add("frame generation needs an RTX 40 or 50 card: off"); frames = 0; }
-        if (why == null && frames > 1 && gen < 50) { notes.Add("more than 2x needs an RTX 50 card: 2x"); frames = 1; }
+        if (!OperatingSystem.IsWindows()) why = "NVIDIA 的文件仅在 Windows 上检查";
+        else if (gen < 20) why = "未找到 NVIDIA RTX 显卡";
+        if (why == null && frames > 0 && gen < 40) { notes.Add("帧生成需要 RTX 40 或 50 显卡：已关闭"); frames = 0; }
+        if (why == null && frames > 1 && gen < 50) { notes.Add("超过 2 倍需要 RTX 50 显卡：改为 2 倍"); frames = 1; }
         if (frames > 0 && !env.ContainsKey("VICTORY_THIN") && env.GetValueOrDefault("VICTORY_ASYNC_SUBMIT") != "1")
-        { notes.Add("frame generation needs Extra draw threads (Settings › Performance): off"); frames = 0; }
+        { notes.Add("帧生成需要“额外绘制线程”（设置 › 性能）：已关闭"); frames = 0; }
         if (frames > 0 && !dlss && B("seriesX", false))
-        { notes.Add("frame generation on Sharp (Series X) needs DLSS upscaling as well: off"); frames = 0; }
-        if (why == null && frames == 0 && !dlss) why = "nothing left to turn on";
+        { notes.Add("在清晰（Series X）模式下开启帧生成还需要 DLSS 超分：已关闭"); frames = 0; }
+        if (why == null && frames == 0 && !dlss) why = "没有可开启的选项";
         if (why == null && Streamline.Missing(SlDir(), Streamline.Needed(frames > 0, dlss)) is string missing)
-            why = missing + " (Settings › Graphics › Get NVIDIA's files)";
-        if (why != null) { notes.Add("DLSS and frame generation off: " + why); return false; }
+            why = missing + "（设置 › 画面 › 获取 NVIDIA 文件）";
+        if (why != null) { notes.Add("DLSS 与帧生成已关闭：" + why); return false; }
         env["VICTORY_STREAMLINE_DIR"] = WinPath(Path.GetFullPath(SlDir()));
         // VICTORY_FRAMEGEN_FRAMES: frames generated between two rendered (ours); VICTORY_FRAMEGEN_X: frames shown
         // for each rendered one (the base's streamline.rs, which reads either).
         if (frames > 0) { env["VICTORY_FRAMEGEN"] = "1"; env["VICTORY_FRAMEGEN_FRAMES"] = frames.ToString(); env["VICTORY_FRAMEGEN_X"] = (frames + 1).ToString(); }
         if (dlss) env["VICTORY_DLSS"] = "1";
-        notes.Add($"using NVIDIA's Streamline: DLSS upscaling {(dlss ? "on" : "off")}, frame generation {(frames > 0 ? (frames + 1) + "x" : "off")}, NVIDIA's files in {SlDir()}");
+        notes.Add($"使用 NVIDIA Streamline：DLSS 超分{(dlss ? "开启" : "关闭")}，帧生成 {(frames > 0 ? (frames + 1) + "x" : "关闭")}，NVIDIA 文件位于 {SlDir()}");
         return dlss;
     }
 
@@ -147,15 +147,15 @@ sealed class Launch
                 foreach (var kv in m["values"]!.AsObject()) settings[kv.Key] = kv.Value?.DeepClone();
                 Save(); SendSettings(); break;
             case "pickGame":
-                if (app.Host.PickFile("Your game: game_scarlett_master.exe", "game_scarlett_master.exe", "The game (game_scarlett_master.exe)") is string g) Set("game", g);
+                if (app.Host.PickFile("你的游戏：game_scarlett_master.exe", "game_scarlett_master.exe", "游戏（game_scarlett_master.exe）") is string g) Set("game", g);
                 SendSettings(); break;
             case "pickFolder":
                 var key = (string?)m["key"] ?? "";
-                if (key is "optiScaler" or "neptuneDir" or "streamlineDir" && app.Host.PickFolder((string?)m["title"] ?? "Choose a folder") is string f) Set(key, f);
+                if (key is "optiScaler" or "neptuneDir" or "streamlineDir" && app.Host.PickFolder((string?)m["title"] ?? "选择文件夹") is string f) Set(key, f);
                 SendSettings(); break;
             case "pickFile":
-                if ((string?)m["key"] == "fsrDll" && app.Host.PickFile("A PC amd_fidelityfx_upscaler_dx12.dll", "*.dll", "DLL files (*.dll)") is string d) Set("fsrDll", d);
-                if ((string?)m["key"] == "keyIcons" && app.Host.PickFile("Keyboard prompt icons (tools\\gfx_input_icons.py)", "*.gfx", "GFX movies (*.gfx)") is string k) Set("keyIcons", k);
+                if ((string?)m["key"] == "fsrDll" && app.Host.PickFile("PC 版 amd_fidelityfx_upscaler_dx12.dll", "*.dll", "DLL 文件 (*.dll)") is string d) Set("fsrDll", d);
+                if ((string?)m["key"] == "keyIcons" && app.Host.PickFile("键盘提示图标（tools\\gfx_input_icons.py）", "*.gfx", "GFX 影片 (*.gfx)") is string k) Set("keyIcons", k);
                 SendSettings(); break;
             case "preset":
                 var t = Target((string?)m["id"] ?? "public");
@@ -169,7 +169,7 @@ sealed class Launch
                 _ = Task.Run(() =>
                 {
                     try { Run(rid, rov, rargs); }
-                    catch (Exception e) { app.Out($"\nCouldn't start the game: {e.Message}\n", "bad"); }
+                    catch (Exception e) { app.Out($"\n无法启动游戏：{e.Message}\n", "bad"); }
                     finally { Interlocked.Exchange(ref starting, 0); }
                 });
                 break;
@@ -283,15 +283,15 @@ sealed class Launch
     int starting;   // a Play is being started (on a worker thread): a second click waits for it
     void Run(string id, JsonObject? overrides, string extraArgs)
     {
-        if (game != null) { app.Out("\nThe game is already running.\n", "bad"); return; }
+        if (game != null) { app.Out("\n游戏已在运行。\n", "bad"); return; }
         // (Neptune) a count being asked (victory.exe warm --count, a second or so) ends first
         for (int i = 0; i < 120 && Volatile.Read(ref counting) != 0; i++) Thread.Sleep(100);
-        if (Process.GetProcessesByName("victory").Length > 0) { app.Out("\nA victory.exe is already running: close it first.\n", "bad"); return; }
+        if (Process.GetProcessesByName("victory").Length > 0) { app.Out("\n已有 victory.exe 在运行：请先关闭。\n", "bad"); return; }
         var (exeDir, play, label) = Target(id);
         var exe = exeDir == null ? "" : Path.Combine(exeDir, "victory.exe");
-        if (!File.Exists(exe)) { app.Out($"\nNo victory.exe in {exeDir ?? "(no folder set)"}: build it or set the Neptune folder.\n", "bad"); return; }
+        if (!File.Exists(exe)) { app.Out($"\n在 {exeDir ?? "（未设置文件夹）"} 中没有 victory.exe：请构建它，或设置 Neptune 文件夹。\n", "bad"); return; }
         var gamePath = S("game");
-        if (!File.Exists(gamePath)) { app.Out("\nSet your game first (Settings › Game).\n", "bad"); return; }
+        if (!File.Exists(gamePath)) { app.Out("\n请先设置你的游戏（设置 › 通用）。\n", "bad"); return; }
 
         var console = new List<string>();
         var notes = new List<string>();
@@ -304,9 +304,9 @@ sealed class Launch
             {
                 Hist(id)["warmStale"] = true;
                 if (BuildPart((string?)Hist(id)["warmKey"]) != BuildPart(key))
-                    app.Out("\nA new game build since the last warm-up: its pipelines are made during play (stutter, dark areas). Warm again for this build.\n", "bad");
+                    app.Out("\n自上次预热后游戏版本已更新：其管线将在游玩时生成（卡顿、暗区）。请为此版本重新预热。\n", "bad");
                 else
-                    app.Out("\nThe flags changed since this build's warm-up: shaders may be translated during play (stutter, 100% CPU). Warm again with these flags.\n", "bad");
+                    app.Out("\n自上次预热后设置已更改：着色器可能在游玩时转译（卡顿、CPU 占用 100%）。请使用当前设置重新预热。\n", "bad");
             }
 
         var args = new List<string> { "play", WinPath(Path.GetFullPath(gamePath)) };
@@ -327,7 +327,7 @@ sealed class Launch
         var logPath = Path.Combine(logDir, label + "-run.log");
         var log = new StreamWriter(logPath, false, new UTF8Encoding(false)) { AutoFlush = true };
         log.WriteLine("launcher: " + string.Join(" ", env.Where(kv => kv.Key.StartsWith("VICTORY_")).Select(kv => $"{kv.Key}={kv.Value}")));
-        foreach (var n in notes) { log.WriteLine("launcher: " + n); app.Out($"\nlauncher: {n}\n", n.StartsWith("using ") || (n.StartsWith("keyboard prompt icons: ") && !n.Contains("pad buttons")) ? "ok" : "bad"); }
+        foreach (var n in notes) { log.WriteLine("launcher: " + n); app.Out($"\nlauncher: {n}\n", n.StartsWith("使用 NVIDIA") || (n.StartsWith("键盘提示图标：") && !n.Contains("手柄")) ? "ok" : "bad"); }
         var psi = Start(file, all, exeDir!, env);
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var started = DateTime.Now;
@@ -346,13 +346,13 @@ sealed class Launch
             game = null; gameId = null;
             AddRun(id, started, code, stopping);
             stopping = false;
-            app.Out($"\n--- the game ended (code {code}); log: {logPath} ---\n", code == 0 ? "ok" : "bad");
+            app.Out($"\n--- 游戏已结束（代码 {code}）；日志：{logPath} ---\n", code == 0 ? "ok" : "bad");
             app.Post(new JsonObject { ["type"] = "game", ["state"] = "end", ["id"] = id, ["code"] = code });
             SendSettings();
         };
         game = p; gameId = id; stopping = false;
         p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
-        app.Out($"\n=== {label}: running ===\n", "h");
+        app.Out($"\n=== {label}：运行中 ===\n", "h");
         app.Post(new JsonObject { ["type"] = "game", ["state"] = "start", ["id"] = id });
         SendSettings();
     }
@@ -537,8 +537,8 @@ sealed class Launch
     {
         var (exeDir, play, label) = Target(id);
         var exe = exeDir == null ? "" : Path.Combine(exeDir, "victory.exe");
-        if (!File.Exists(exe)) { app.Out("\nNo victory.exe to warm with yet.\n", "bad"); return; }
-        if (!File.Exists(S("game"))) { app.Out("\nSet your game first (Settings › Game).\n", "bad"); return; }
+        if (!File.Exists(exe)) { app.Out("\n还没有可用于预热的 victory.exe。\n", "bad"); return; }
+        if (!File.Exists(S("game"))) { app.Out("\n请先设置你的游戏（设置 › 通用）。\n", "bad"); return; }
         // threads: every pipeline the driver builds at once takes its own memory, and on all 16
         // threads the driver ran out ("Not enough memory resources", pipelines refused)
         var (file, all) = Wrap(exe, ["warm", "--jobs", WarmJobs().ToString(), "--used"]);
@@ -551,15 +551,15 @@ sealed class Launch
         // (Neptune) nothing known yet (a PC where the game has not run): nothing to warm
         if (ShaderState(id).state == "empty")
         {
-            app.Out("\nNothing to prepare yet: play once so the game lists its shaders, then warm them here.\n", "bad");
+            app.Out("\n暂无需准备：先玩一次，让游戏列出着色器，再在这里预热。\n", "bad");
             return;
         }
-        Queue($"{label}: prepare the shaders (warm)", file, all, exeDir!, env,
+        Queue($"{label}：准备着色器（预热）", file, all, exeDir!, env,
             code =>
             {
                 // a warm-up over nothing known is not a warm-up: it is not recorded (the card stays Cold)
                 if (code == 0 && CountNow(exe, exeDir!, env) is (0, _))
-                    app.Out("\nNothing was prepared: the game has not listed its shaders yet. Play once, then warm them here.\n", "bad");
+                    app.Out("\n没有准备任何内容：游戏尚未列出着色器。先玩一次，再在这里预热。\n", "bad");
                 else SetWarm(id, code, key, (DateTime.Now - began).TotalMinutes);
                 SendSettings();
             }, low: true);
@@ -644,7 +644,7 @@ sealed class Launch
             {
                 p.WaitForExit();
                 var code = 0; try { code = p.ExitCode; } catch { }
-                app.Out(code == 0 ? "--- done ---\n" : $"--- FAILED (exit code {code}) ---\n", code == 0 ? "ok" : "bad");
+                app.Out(code == 0 ? "--- 完成 ---\n" : $"--- 失败（退出代码 {code}）---\n", code == 0 ? "ok" : "bad");
                 job = null;
                 if (code != 0) lock (jobs) jobs.Clear();   // a failed step stops the steps queued after it
                 try { done?.Invoke(code); } catch (Exception e) { app.Out(e.Message + "\n", "bad"); }
@@ -658,7 +658,7 @@ sealed class Launch
         catch (Exception e)
         {
             job = null; lock (jobs) jobs.Clear();
-            app.Out($"Couldn't start {file}: {e.Message}\n", "bad");
+            app.Out($"无法启动 {file}：{e.Message}\n", "bad");
             app.Post(new JsonObject { ["type"] = "job", ["state"] = "end", ["label"] = label, ["code"] = -1 });
         }
     }

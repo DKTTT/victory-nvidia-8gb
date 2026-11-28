@@ -14,7 +14,7 @@ sealed class WindowsHost : Form, IDesktopHost
     public WindowsHost(bool test)
     {
         controller = new App(this, test, null);
-        Text = App.Title + (test ? " (test profile)" : "");
+        Text = App.Title + (test ? "（测试配置）" : "");
         try { Icon = new Icon(Path.Combine(root, "victory.ico")); } catch { }
         BackColor = Color.FromArgb(0x11, 0x11, 0x15);
         ClientSize = new Size(1240, 800);
@@ -151,7 +151,7 @@ sealed class WindowsHost : Form, IDesktopHost
     {
         using var dialog = new SaveFileDialog
         {
-            Title = "Share this save as a zip", Filter = "GTA VI save (*.zip)|*.zip",
+            Title = "将此存档分享为 zip", Filter = "GTA VI 存档 (*.zip)|*.zip",
             FileName = filename, DefaultExt = "zip",
             InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
         };
@@ -162,7 +162,7 @@ sealed class WindowsHost : Form, IDesktopHost
     {
         using var dialog = new OpenFileDialog
         {
-            Title = "Import GTA VI saves", Filter = "Save zips (*.zip)|*.zip", Multiselect = true,
+            Title = "导入 GTA VI 存档", Filter = "存档 zip (*.zip)|*.zip", Multiselect = true,
         };
         return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileNames : [];
     }
@@ -177,7 +177,7 @@ sealed class WindowsHost : Form, IDesktopHost
 
     public string? PickFile(string title, string pattern, string patternName)
     {
-        using var dialog = new OpenFileDialog { Title = title, Filter = $"{patternName}|{pattern}|All files (*.*)|*.*" };
+        using var dialog = new OpenFileDialog { Title = title, Filter = $"{patternName}|{pattern}|所有文件 (*.*)|*.*" };
         return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
     }
 

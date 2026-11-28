@@ -20,7 +20,7 @@
     btns.querySelector('[data-win="min"]').innerHTML = svg('min');
     const m = btns.querySelector('[data-win="max"]');
     m.innerHTML = svg(max ? 'restore' : 'max');
-    m.title = max ? 'Restore' : 'Maximize';
+    m.title = max ? '还原' : '最大化';
     m.setAttribute('aria-label', m.title);
     btns.querySelector('[data-win="close"]').innerHTML = svg('close');
   }

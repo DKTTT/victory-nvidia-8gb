@@ -23,7 +23,7 @@ static class Program
 #if WINDOWS
             ShowOther();
 #else
-            Console.Error.WriteLine(App.Title + " is already open.");
+            Console.Error.WriteLine(App.Title + " 已在运行。");
 #endif
             return 0;
         }
@@ -43,15 +43,15 @@ static class Program
             }
             if (args[i] == "--help" || args[i] == "-h")
             {
-                Console.WriteLine("Usage: VictoryLauncher.exe [--test | --save-dir PATH]");
+                Console.WriteLine("用法：VictoryLauncher.exe [--test | --save-dir PATH]");
                 return 0;
             }
-            Console.Error.WriteLine($"Unrecognized or incomplete argument: {args[i]}. See --help.");
+            Console.Error.WriteLine($"无法识别或不完整的参数：{args[i]}。参见 --help。");
             return 2;
         }
         if (test && saveDirectory != null)
         {
-            Console.Error.WriteLine("--test uses its own save folder. Run it without --save-dir.");
+            Console.Error.WriteLine("--test 使用自己的存档文件夹。请勿同时使用 --save-dir。");
             return 2;
         }
         try { return new LinuxHost(test, saveDirectory).Run(); }
@@ -134,7 +134,7 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
             var folder = host.ChooseSaveFolder(SavesDir());
             if (folder == null) { SendSaves(); return; }
             locations.SetLocation(folder);
-            SendSaves("Game save folder selected.");
+            SendSaves("已选择游戏存档文件夹。");
         }
         catch (Exception error) { SendSaves(error.Message, false); }
     }
@@ -153,7 +153,7 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
         foreach (var entry in new DirectoryInfo(from).EnumerateFileSystemInfos())
         {
             if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new IOException($"The save contains a link at {entry.Name}.");
+                throw new IOException($"存档在 {entry.Name} 处包含链接。");
             var target = Path.Combine(to, entry.Name);
             if (entry is DirectoryInfo) CopyDir(entry.FullName, target);
             else File.Copy(entry.FullName, target, true);
@@ -239,15 +239,15 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
         {
             var n = SafeName(name);
             var dir = SavesDir();
-            if (n.Length == 0) { SendSaves("Give the save a name first.", false); return; }
-            if (dir == null || !Directory.Exists(dir)) { SendSaves("No game save found yet.", false); return; }
+            if (n.Length == 0) { SendSaves("请先给存档起个名字。", false); return; }
+            if (dir == null || !Directory.Exists(dir)) { SendSaves("还没有找到游戏存档。", false); return; }
             var target = Path.Combine(SnapsRoot, n);
-            if (Directory.Exists(target)) { SendSaves($"A save called \"{n}\" already exists. Pick another name or delete it first.", false); return; }
+            if (Directory.Exists(target)) { SendSaves($"已存在名为“{n}”的存档。请换一个名字，或先删除它。", false); return; }
             CopyDir(dir, target);
             MarkKept(target);
-            SendSaves($"Saved the current game as \"{n}\".");
+            SendSaves($"已将当前游戏保存为“{n}”。");
         }
-        catch (Exception e) { SendSaves("Couldn't save: " + e.Message, false); }
+        catch (Exception e) { SendSaves("无法保存：" + e.Message, false); }
     }
 
     // keeps the current save as "auto <time>" (the 5 newest of those stay) before anything replaces it
@@ -267,14 +267,14 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
     {
         try
         {
-            if (GameRunning()) { SendSaves("Close the game first: it would overwrite the save when it autosaves.", false); return; }
+            if (GameRunning()) { SendSaves("请先关闭游戏：游戏自动保存时会覆盖该存档。", false); return; }
             var label = SafeName(name);
-            if (label.Length == 0) { SendSaves("Select a save to load.", false); return; }
+            if (label.Length == 0) { SendSaves("请选择要载入的存档。", false); return; }
             var src = Path.Combine(fromTeam ? TeamRoot : SnapsRoot, label);
-            if (!Directory.Exists(src)) { SendSaves("That save is gone.", false); return; }
+            if (!Directory.Exists(src)) { SendSaves("该存档已不存在。", false); return; }
             var dir = locations.RequireWritableLocation();
             if (Path.GetFullPath(src).Equals(Path.GetFullPath(dir), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-                throw new IOException("Choose the game's saves folder outside the kept saves library.");
+                throw new IOException("请选择存档库之外的游戏存档文件夹。");
             string? backup = null;
             Directory.CreateDirectory(Path.GetDirectoryName(dir)!);
             var staged = dir + ".vism-new-" + Guid.NewGuid().ToString("N");
@@ -284,7 +284,7 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
                 CopyDir(src, staged);
                 File.Delete(Path.Combine(staged, "about.txt"));
                 backup = Backup();
-                if (GameRunning()) throw new IOException("Close the game before replacing its save.");
+                if (GameRunning()) throw new IOException("替换存档前请先关闭游戏。");
                 if (Directory.Exists(dir)) Directory.Move(dir, previous);
                 try { Directory.Move(staged, dir); }
                 catch
@@ -295,9 +295,9 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
                 DeleteDir(previous);
             }
             finally { DeleteDir(staged); }
-            SendSaves($"Loaded \"{SafeName(name)}\".{(backup != null ? $" Your previous save was kept as \"{backup}\"." : "")} Start the game and pick Continue.");
+            SendSaves($"已载入“{SafeName(name)}”。{(backup != null ? $"之前的存档已保留为“{backup}”。" : "")}启动游戏后选择“继续”。");
         }
-        catch (Exception e) { SendSaves("Couldn't load: " + e.Message, false); }
+        catch (Exception e) { SendSaves("无法载入：" + e.Message, false); }
     }
 
     void SaveDelete(string? name)
@@ -305,11 +305,11 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
         try
         {
             var label = SafeName(name);
-            if (label.Length == 0) { SendSaves("Select a save to delete.", false); return; }
+            if (label.Length == 0) { SendSaves("请选择要删除的存档。", false); return; }
             DeleteDir(Path.Combine(SnapsRoot, label));
-            SendSaves($"Deleted \"{label}\".");
+            SendSaves($"已删除“{label}”。");
         }
-        catch (Exception e) { SendSaves("Couldn't delete: " + e.Message, false); }
+        catch (Exception e) { SendSaves("无法删除：" + e.Message, false); }
     }
 
     // a new story: the current save is kept, the story slots are cleared, the settings slot stays
@@ -317,21 +317,21 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
     {
         try
         {
-            if (GameRunning()) { SendSaves("Close the game first.", false); return; }
+            if (GameRunning()) { SendSaves("请先关闭游戏。", false); return; }
             var dir = SavesDir();
-            if (dir == null || !Directory.Exists(dir)) { SendSaves("No save yet: the game starts a new story anyway."); return; }
+            if (dir == null || !Directory.Exists(dir)) { SendSaves("还没有存档：游戏本来就会开始新剧情。"); return; }
             dir = locations.RequireWritableLocation();
             var backup = Backup();
-            if (GameRunning()) { SendSaves("Close the game before clearing the story.", false); return; }
+            if (GameRunning()) { SendSaves("清空剧情前请先关闭游戏。", false); return; }
             var cleared = 0;
             foreach (var blob in Directory.GetDirectories(dir, "*~*", SaveTree))
             {
                 if (Path.GetFileName(blob).StartsWith("SettingsProfileSettings", StringComparison.OrdinalIgnoreCase) || !Directory.Exists(blob)) continue;
                 DeleteDir(blob); cleared++;
             }
-            SendSaves($"Story cleared ({cleared} save slots).{(backup != null ? $" Your previous save was kept as \"{backup}\"." : "")} The next run starts a new game.");
+            SendSaves($"已清空剧情（{cleared} 个存档槽）。{(backup != null ? $"之前的存档已保留为“{backup}”。" : "")}下次运行将开始新游戏。");
         }
-        catch (Exception e) { SendSaves("Couldn't clear the save: " + e.Message, false); }
+        catch (Exception e) { SendSaves("无法清空存档：" + e.Message, false); }
     }
 
     // ---- share: one save as a zip (save-info.json + saves\...) ----
@@ -340,14 +340,14 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
         try
         {
             string src, label;
-            if (kind == "current") { src = SavesDir() ?? ""; label = "Current save " + DateTime.Now.ToString("yyyy-MM-dd HHmm"); }
+            if (kind == "current") { src = SavesDir() ?? ""; label = "当前存档 " + DateTime.Now.ToString("yyyy-MM-dd HHmm"); }
             else { label = SafeName(name); src = label.Length == 0 ? "" : Path.Combine(kind == "team" ? TeamRoot : SnapsRoot, label); }
-            if (src.Length == 0 || !Directory.Exists(src)) { SendSaves("Nothing to share.", false); return; }
-            var filename = host.ChooseExport($"GTA VI save - {label}.zip");
+            if (src.Length == 0 || !Directory.Exists(src)) { SendSaves("没有可分享的内容。", false); return; }
+            var filename = host.ChooseExport($"GTA VI 存档 - {label}.zip");
             if (filename == null) { SendSaves(); return; }
             using (var zip = new ZipArchive(File.Create(filename), ZipArchiveMode.Create))
             {
-                var info = new SaveInfo(label, Note(src), "GTA VI (Xbox Series), title " + TitleId, DirNewest(src).ToString("yyyy-MM-dd HH:mm"), "VI Save Manager");
+                var info = new SaveInfo(label, Note(src), "GTA VI（Xbox Series），Title ID " + TitleId, DirNewest(src).ToString("yyyy-MM-dd HH:mm"), "VI 存档管理器");
                 var e = zip.CreateEntry("save-info.json");
                 using (var w = new StreamWriter(e.Open(), new UTF8Encoding(false))) w.Write(JsonSerializer.Serialize(info, VismJsonIndented.Default.SaveInfo));
                 foreach (var f in Directory.EnumerateFiles(src, "*", SaveTree))
@@ -357,9 +357,9 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
                 }
             }
             host.RevealExport(filename);
-            SendSaves($"Made {Path.GetFileName(filename)}: send it to anyone, they click Import.");
+            SendSaves($"已生成 {Path.GetFileName(filename)}：发给任何人，对方点击导入即可。");
         }
-        catch (Exception e) { SendSaves("Couldn't make the zip: " + e.Message, false); }
+        catch (Exception e) { SendSaves("无法生成 zip：" + e.Message, false); }
     }
 
     // ---- import: a zip from Share, or any zip with a game save folder in it ----
@@ -374,8 +374,8 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
             try { done.Add(ImportZip(file, shipped: false)); }
             catch (Exception e) { failed.Add($"{Path.GetFileName(file)} ({e.Message})"); }
         }
-        var msg = (done.Count > 0 ? $"Imported: {string.Join(", ", done)}. Press Load on it to play from there." : "")
-                + (failed.Count > 0 ? $" Couldn't import: {string.Join("; ", failed)}." : "");
+        var msg = (done.Count > 0 ? $"已导入：{string.Join("、", done)}。按“载入”即可从该存档开始游戏。" : "")
+                + (failed.Count > 0 ? $" 无法导入：{string.Join("；", failed)}。" : "");
         SendSaves(msg.Trim(), failed.Count == 0);
     }
 
@@ -386,13 +386,13 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
         var tmp = Path.Combine(Path.GetTempPath(), "vism-" + Guid.NewGuid().ToString("N"));
         try
         {
-            if (new FileInfo(file).Length > 200L * 1024 * 1024) throw new Exception("over 200 MB, not a save");
+            if (new FileInfo(file).Length > 200L * 1024 * 1024) throw new Exception("超过 200 MB，不是存档");
             ZipFile.ExtractToDirectory(file, tmp);   // refuses entries that point outside tmp
             // the save root is the folder that holds the user folder (16 hex digits, e.g. 0009000000000001)
             var root = new[] { tmp }.Concat(Directory.GetDirectories(tmp, "*", SearchOption.AllDirectories))
                 .FirstOrDefault(d => Directory.GetDirectories(d).Any(c => UserFolder.IsMatch(Path.GetFileName(c))))
-                ?? throw new Exception("no GTA VI save inside");
-            string name = Path.GetFileNameWithoutExtension(file).Replace("GTA VI save - ", ""), note = "";
+                ?? throw new Exception("其中没有 GTA VI 存档");
+            string name = Path.GetFileNameWithoutExtension(file).Replace("GTA VI 存档 - ", "").Replace("GTA VI save - ", ""), note = "";
             var infoPath = Path.Combine(tmp, "save-info.json");
             if (File.Exists(infoPath))
             {
@@ -400,12 +400,12 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
                 if (!shipped) name = (string?)info?["name"] ?? name;
                 note = (string?)info?["note"] ?? "";
             }
-            if (shipped) note = "Shipped with Project Neptune VI" + (note.Length > 0 ? " · " + note : "");
-            name = Unique(SnapsRoot, SafeName(name).Length > 0 ? SafeName(name) : "Imported save");
+            if (shipped) note = "随 GTA6 CN · Victory 附带" + (note.Length > 0 ? " · " + note : "");
+            name = Unique(SnapsRoot, SafeName(name).Length > 0 ? SafeName(name) : "导入的存档");
             var target = Path.Combine(SnapsRoot, name);
             foreach (var user in Directory.GetDirectories(root).Where(c => UserFolder.IsMatch(Path.GetFileName(c))))
                 CopyDir(user, Path.Combine(target, Path.GetFileName(user)));
-            File.WriteAllText(Path.Combine(target, "about.txt"), note.Length > 0 ? note : "Imported from " + Path.GetFileName(file));
+            File.WriteAllText(Path.Combine(target, "about.txt"), note.Length > 0 ? note : "导入自 " + Path.GetFileName(file));
             MarkKept(target);
             return name;
         }
