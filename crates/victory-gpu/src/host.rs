@@ -1,4 +1,4 @@
-//! The host GPU: one D3D12 device and direct queue (decision 0007), and a
+﻿//! The host GPU: one D3D12 device and direct queue (decision 0007), and a
 //! window to present on.
 //!
 //! shortcut: every submission is waited for, so CPU and GPU never overlap
@@ -941,7 +941,23 @@ fn create() -> windows::core::Result<Host> {
                 device = None;
             }
             if device.is_none() {
-                D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+                // (Victory) D3D12CreateDevice(NULL) takes the desktop default adapter; on a hybrid laptop that is
+                // often the integrated GPU. Pick the card with the most dedicated video memory instead
+                // (VICTORY_GPU can name one; VICTORY_GPU_LIST=1 logs them all).
+                match crate::adapter::pick() {
+                    Some(p) => {
+                        if let Err(e) = D3D12CreateDevice(&p.adapter, D3D_FEATURE_LEVEL_12_0, &mut device) {
+                            tracing::warn!(gpu = %p.name, "the picked GPU cannot make a D3D12 device ({e}); the default adapter is used");
+                            device = None;
+                        } else {
+                            tracing::info!(gpu = %p.name, dedicated_mb = p.dedicated / 1048576, "host device on the picked GPU");
+                        }
+                    }
+                    None => tracing::warn!("no DXGI adapter could be listed; the default adapter is used"),
+                }
+                if device.is_none() {
+                    D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+                }
             }
             // Whether a GPU hang ends the run or freezes the PC (#1054).
             crate::tdr::log();
