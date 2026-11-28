@@ -107,6 +107,41 @@ sealed class Launch
         try { Gpu(ref gpu, ref driver, ref vram); } catch { }
         return gpuNameCached = gpu ?? "";
     }
+    // (Victory) the package's nvidia-sdk keeps the DLLs in nvidia-sdk\Streamline\bin\x64; find that folder.
+    static string? DllDir(string dir)
+    {
+        if (dir.Length == 0 || !Directory.Exists(dir)) return null;
+        if (File.Exists(Path.Combine(dir, "sl.interposer.dll"))) return dir;
+        foreach (var sub in new[]
+                 {
+                     Path.Combine(dir, "Streamline", "bin", "x64"),
+                     Path.Combine(dir, "bin", "x64"),
+                     Path.Combine(dir, "bin"),
+                     Path.Combine(dir, "nvidia-sdk"),
+                     Path.Combine(dir, "nvidia-sdk", "Streamline", "bin", "x64"),
+                 })
+            if (File.Exists(Path.Combine(sub, "sl.interposer.dll"))) return sub;
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(dir, "sl.interposer.dll", SearchOption.AllDirectories))
+                return Path.GetDirectoryName(f)!;
+        }
+        catch { }
+        return null;
+    }
+    string? bundledNvidiaCached;
+    string? BundledNvidiaDir()
+    {
+        if (bundledNvidiaCached != null) return bundledNvidiaCached.Length == 0 ? null : bundledNvidiaCached;
+        var roots = new List<string> { Bundled };
+        if (ReleaseDir() is string r) roots.Add(r);
+        if (S("neptuneDir") is { Length: > 0 } nd) roots.Add(nd);
+        foreach (var root in roots.Distinct(StringComparer.OrdinalIgnoreCase))
+            foreach (var n in new[] { "nvidia-sdk", "streamline", "dlssg" })
+                if (DllDir(Path.Combine(root, n)) is string found) return bundledNvidiaCached = found;
+        bundledNvidiaCached = "";
+        return null;
+    }
     string? vendorCached;
     string Vendor()
     {
@@ -118,7 +153,9 @@ sealed class Launch
     }
     // frames generated between two of the title's: 0 (off), 1 (2x), 2 (3x), 3 (4x), 5 (6x)
     int FrameGen() => settings["framegen"] is JsonValue v && v.TryGetValue<int>(out var n) && n is >= 0 and <= 5 ? n : 0;
-    string SlDir() => S("streamlineDir") is { Length: > 0 } d ? d : Streamline.DefaultDir;
+    string SlDir() => S("streamlineDir") is { Length: > 0 } d
+        ? (DllDir(d) ?? d)
+        : (BundledNvidiaDir() ?? Streamline.DefaultDir);
     JsonObject? SlStatus()
     {
         if (Rtx() < 20) return null;
@@ -492,10 +529,12 @@ sealed class Launch
             if (Directory.Exists(sm86) && !env.ContainsKey("VICTORY_DLSSG_SM86_DIR")) env["VICTORY_DLSSG_SM86_DIR"] = WinPath(sm86);
             foreach (var n in new[] { "nvidia-sdk", "dlssg-sm86", "dlssg", "streamline" })
             {
-                var d = Path.Combine(baseDir, n);
-                if (Directory.Exists(d) && !env.ContainsKey("VICTORY_STREAMLINE_DIR")) { env["VICTORY_STREAMLINE_DIR"] = WinPath(d); break; }
+                if (env.ContainsKey("VICTORY_STREAMLINE_DIR")) break;
+                if (DllDir(Path.Combine(baseDir, n)) is string d) env["VICTORY_STREAMLINE_DIR"] = WinPath(d);
             }
         }
+        if (!env.ContainsKey("VICTORY_STREAMLINE_DIR") && BundledNvidiaDir() is string bundledSl)
+            env["VICTORY_STREAMLINE_DIR"] = WinPath(bundledSl);
         // "Save video memory", for cards under 16 GB
         if (B("vramSaver", false)) { env.Remove("VICTORY_CARD_WINDOWS_MB"); env["VICTORY_CARD_BUFFERS_MB"] = "1024"; }
         overrides ??= settings["ov:" + id] as JsonObject;
