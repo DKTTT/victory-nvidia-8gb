@@ -466,7 +466,8 @@ let FG = null;   // 自动查找游戏的结果（ok/path），在设置与欢�
 function openTierDlg(m) {
   if (!m?.tiers?.length) return;
   WT = m;
-  WT.selected = m.tiers.some((t) => t.key === 'balanced') ? 'balanced' : m.tiers[0].key;
+  const want = st('warmTier', 'balanced');
+  WT.selected = m.tiers.some((t) => t.key === want) ? want : (m.tiers.some((t) => t.key === 'balanced') ? 'balanced' : m.tiers[0].key);
   $('#tierDlg').hidden = false;
   renderTierDlg();
 }
@@ -529,8 +530,9 @@ const SECTIONS = {
   ]],
   performance: () => ['性能', '每次运行时的相关设置。', [
     row('额外绘制线程', '把游戏的绘制任务分摊到更多 CPU 核心（推荐）', tog('thin', st('thin', true), '额外绘制线程')),
-    row('预热线程数', `同时预热多少个着色器。全部 ${S.cores || ''} 个最快；一半（默认）占用更少内存，电脑仍可正常使用。`,
-      `<div class="seg" role="radiogroup" aria-label="预热线程数">${[['half', S.warmJobsDefault], ['all', S.cores]].map(([k, n]) => `<button data-jobs="${n}" class="${(st('warmJobs', 0) || S.warmJobsDefault) == n ? 'on' : ''}">${k === 'half' ? '一半' : '全部'} (${n})</button>`).join('')}</div>`),
+    // (Victory) one default tier for the warm dialog; the actual process count is still derived there from CPU/RAM
+    row('默认预热档位', '打开预热时默认选中的档位。实际进程数会按 CPU 与内存自动调整，弹窗里会显示；不再有第二个"预热线程数"开关。',
+      `<div class="seg" role="radiogroup" aria-label="默认预热档位">${[['quiet','安静'],['balanced','平衡'],['turbo','暴力'],['extreme','极强']].map(([k, n]) => `<button data-warmtier="${k}" class="${st('warmTier', 'balanced') === k ? 'on' : ''}">${n}</button>`).join('')}</div>`),
     row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '开始预热'}</button>`),
     // (Victory) the shader cache can be GBs: keep it off the C drive by default, and let the player move it
     // (Victory) auto tune from the machine, plus the two system buttons people need for "no picture / crash"
@@ -709,7 +711,7 @@ document.addEventListener('click', (e) => {
     if (k === 'dlss') { SL = null; renderSettings(); }
     return;
   }
-  const jb = t.closest('[data-jobs]'); if (jb) { set({ warmJobs: +jb.dataset.jobs }); return renderSettings(); }
+  const wt = t.closest('[data-warmtier]'); if (wt) { set({ warmTier: wt.dataset.warmtier }); return renderSettings(); }
   const md = t.closest('[data-mode]'); if (md) { set({ seriesX: md.dataset.mode === 'x' }); renderSettings(); return renderHome(); }
   const act = t.closest('[data-act]');
   if (act) switch (act.dataset.act) {
