@@ -100,9 +100,25 @@ pub extern "system" fn UnregisterAppConstrainedChangeNotification(registration: 
 const TITLE_PROC: PCWSTR = w!("victory.wndproc");
 
 /// Fullscreen, the English keyboard and the mouse capture are asked for
-/// (`=1`, or the F1 menu): left unset, the window and input stay as before.
+/// (`=1`, or the F1 menu); the mouse capture is also on for the keyboard and
+/// mouse support (`VICTORY_KEYBOARD`, on by default). Left unset, the window
+/// and input stay as before.
 pub(super) fn enabled(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| v == "1")
+}
+
+/// `VICTORY_MOUSE_CAPTURE=1`: the title reads a mouse device of its own
+/// ([`captured_mouse_delta`]); the keyboard and mouse support then leaves the
+/// stand-in pad's right stick to it, so the camera does not turn twice.
+pub(super) fn mouse_capture_opt_in() -> bool {
+    enabled("VICTORY_MOUSE_CAPTURE")
+}
+
+/// The pointer is captured while the title's window has the focus: asked for
+/// by `VICTORY_MOUSE_CAPTURE=1`, and needed by the keyboard and mouse support
+/// to look around with the mouse.
+fn mouse_capture() -> bool {
+    mouse_capture_opt_in() || super::gameinput::keyboard_feeds_pad()
 }
 
 fn fullscreen(hwnd: HWND) {
@@ -153,7 +169,7 @@ static MOUSE_CAPTURE: std::sync::LazyLock<Mutex<MouseCapture>> =
     std::sync::LazyLock::new(|| Mutex::new(MouseCapture::default()));
 
 fn capture_mouse(hwnd: HWND, active: bool) {
-    if !enabled("VICTORY_MOUSE_CAPTURE") { return; }
+    if !mouse_capture() { return; }
     let mut state = MOUSE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: runs on the window thread; local geometry, balanced cursor count.
     unsafe {
@@ -186,7 +202,7 @@ fn capture_mouse(hwnd: HWND, active: bool) {
 }
 
 pub(super) fn captured_mouse_delta() -> Option<(i64, i64)> {
-    if !enabled("VICTORY_MOUSE_CAPTURE") { return None; }
+    if !mouse_capture() { return None; }
     let mut state = MOUSE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: sampling and warping serialize with capture/focus messages.
     unsafe {
@@ -353,6 +369,10 @@ fn hook(hwnd: HWND) {
             fullscreen(hwnd);
             english_input();
             capture_mouse(hwnd, true);
+            // (Neptune) Looking around with the mouse reads raw input: the
+            // pointer is only captured and clipped, not pinned, so its
+            // position stops changing at an edge while the movement goes on.
+            super::gameinput::watch_raw_mouse(hwnd);
         }
     }
 }
@@ -386,6 +406,11 @@ extern "system" fn window_proc(
     // menu. The mouse still opens it from the title bar.
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
         return 0;
+    }
+    // (Neptune) Mouse movement for the keyboard and mouse support while the
+    // pointer is captured; the message still goes on to the title's procedure.
+    if message == wm::WM_INPUT {
+        super::gameinput::raw_input(lparam);
     }
     // SAFETY: the procedure `hook` stored, called the way the system would.
     unsafe {
@@ -534,7 +559,9 @@ mod tests {
 
     #[test]
     fn mouse_reference_handles_focus_reset_and_warp() {
-        if !enabled("VICTORY_MOUSE_CAPTURE") { assert_eq!(captured_mouse_delta(), None); }
+        // No window of ours has been captured (this is not the title's window
+        // thread), so there is no motion to take.
+        assert_eq!(captured_mouse_delta(), None);
         let mut reference = None;
         assert_eq!(mouse_motion(&mut reference, (480, 390), None), (0, 0));
         assert_eq!(mouse_motion(&mut reference, (500, 400), None), (20, 10));

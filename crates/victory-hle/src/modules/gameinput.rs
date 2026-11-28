@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -67,17 +67,24 @@ const DEVICES: usize = PADS + 3;
 const HISTORY: usize = 256;
 const POLL: Duration = Duration::from_millis(8);
 
-/// (Neptune) The key that is the stand-in pad's A: Enter (this tree's table below
-/// maps it to A).
-const A_KEY: u8 = 0x0D;
+/// (Neptune) The key that is the stand-in pad's A: the space bar (it was Enter).
+const A_KEY: u8 = 0x20;
 
 /// The keyboard's stand-in gamepad (virtual key, button); README lists it.
-/// Sticks: W/A/S/D left, I/J/K/L right; triggers Z and C.
-const FALLBACK_BUTTONS: [(u8, u32); 14] = [
+/// Sticks: W/A/S/D left, I/J/K/L right; triggers E (interact) and C.
+const FALLBACK_BUTTONS: [(u8, u32); 20] = [
+    // (Neptune) Shift pushes the left stick in, Ctrl the right one (either
+    // side's key; devices report the sided keys only).
+    (0xA0, LEFT_STICK),
+    (0xA1, LEFT_STICK),
+    (0xA2, RIGHT_STICK),
+    (0xA3, RIGHT_STICK),
     (0x1B, MENU), // Esc
-    (0x09, VIEW), // Tab
-    (A_KEY, A),   // Enter
-    (0x08, B),    // Backspace
+    (b'V', VIEW),
+    (0x09, Y), // Tab
+    (A_KEY, A), // Space
+    (0x0D, A),  // Enter
+    (0x08, B),  // Backspace
     (b'X', X),
     (b'Y', Y),
     (0x26, UP), // arrows
@@ -85,10 +92,54 @@ const FALLBACK_BUTTONS: [(u8, u32); 14] = [
     (0x25, LEFT),
     (0x27, RIGHT),
     (b'Q', LEFT_SHOULDER),
-    (b'E', RIGHT_SHOULDER),
+    (b'Z', RIGHT_SHOULDER),
     (b'F', LEFT_STICK),
     (b'H', RIGHT_STICK),
 ];
+
+/// The mouse as the stand-in pad reads it (Neptune): the right button is
+/// the left trigger, the left button the right trigger, and movement the
+/// right stick (-1 to 1, up positive).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Mouse {
+    left: bool,
+    right: bool,
+    x: f32,
+    y: f32,
+}
+
+/// Raw mouse movement not yet taken by a reading (device counts, right and
+/// down positive). Raw input keeps coming while the pointer is clipped to the
+/// title's window, where its position no longer changes at an edge, so the
+/// position says nothing about movement.
+static RAW_DX: AtomicI32 = AtomicI32::new(0);
+static RAW_DY: AtomicI32 = AtomicI32::new(0);
+/// Raw mouse input is registered for the title's window.
+static RAW_MOUSE: AtomicBool = AtomicBool::new(false);
+
+/// (Neptune) `VICTORY_KEYBOARD=0`: the keyboard and the mouse feed nothing to
+/// the stand-in pad (a controller only; the keyboard device itself still
+/// reports its keys). Default on.
+static KEYBOARD_FEEDS_PAD: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("VICTORY_KEYBOARD").map_or(true, |v| v.trim() != "0"));
+
+pub(super) fn keyboard_feeds_pad() -> bool {
+    *KEYBOARD_FEEDS_PAD
+}
+
+/// The mouse feeds the stand-in pad's right stick and triggers: while
+/// `VICTORY_KEYBOARD` is on, and not while `VICTORY_MOUSE_CAPTURE=1` has the
+/// title read a mouse device of its own (the camera would turn twice).
+#[cfg(windows)]
+fn mouse_look() -> bool {
+    keyboard_feeds_pad() && !crate::modules::lifecycle::mouse_capture_opt_in()
+}
+
+/// The stand-in pad: the keyboard's and the mouse's state by [`fallback`] when
+/// `keyboard` is on, at rest otherwise.
+fn stand_in(keys: &[KeyState], mouse: Mouse, keyboard: bool) -> PadState {
+    if keyboard { fallback(keys, mouse) } else { PadState::default() }
+}
 
 /// (Neptune) Draws a frame from which the world is taken to be on screen: the start screens and
 /// the loading screen draw 1 to 12, menus some tens, the lightest room seen 1,900.
@@ -160,6 +211,8 @@ fn apply_mouse_sample(
 /// Host input, or a fake in tests.
 trait Source: Send {
     fn mouse(&mut self) -> Option<MouseState> { None }
+    /// The mouse as the stand-in pad reads it: taken from raw input once a poll.
+    fn pointer(&mut self) -> Mouse { Mouse::default() }
     /// The pad in host slot `slot`, `None` when the slot is empty.
     fn pad(&mut self, slot: usize) -> Option<PadState>;
     /// Keys held down; none while the title's window lacks focus.
@@ -168,7 +221,7 @@ trait Source: Send {
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
 
-fn fallback(keys: &[KeyState]) -> PadState {
+fn fallback(keys: &[KeyState], mouse: Mouse) -> PadState {
     let on = |vk: u8| {
         if keys.iter().any(|k| k.virtual_key == vk) {
             1.0
@@ -181,12 +234,13 @@ fn fallback(keys: &[KeyState]) -> PadState {
             .iter()
             .filter(|(vk, _)| on(*vk) != 0.0)
             .fold(0, |all, (_, bit)| all | bit),
-        left_trigger: on(b'Z'),
-        right_trigger: on(b'C'),
+        // E interacts: the title's interact prompts are the left trigger.
+        left_trigger: f32::max(on(b'E'), f32::from(u8::from(mouse.right))),
+        right_trigger: f32::max(on(b'C'), f32::from(u8::from(mouse.left))),
         left_x: on(b'D') - on(b'A'),
         left_y: on(b'W') - on(b'S'),
-        right_x: on(b'L') - on(b'J'),
-        right_y: on(b'I') - on(b'K'),
+        right_x: (on(b'L') - on(b'J') + mouse.x).clamp(-1.0, 1.0),
+        right_y: (on(b'I') - on(b'K') + mouse.y).clamp(-1.0, 1.0),
     }
 }
 
@@ -486,12 +540,14 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, keys, mouse) = {
+        let (pads, keys, mouse, pointer) = {
             let mut source = lock(&self.source);
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
-            (pads, source.keys(), source.mouse())
+            let keys = source.keys();
+            let mouse = source.mouse();
+            (pads, keys, mouse, source.pointer())
         };
-        let events = self.state().poll(&self.devices, self.one_pad, pads, keys, mouse);
+        let events = self.state().poll(&self.devices, self.one_pad, pads, keys, mouse, pointer);
         self.deliver(events);
     }
 
@@ -538,21 +594,30 @@ impl State {
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
         mouse: Option<MouseState>,
+        pointer: Mouse,
     ) -> Vec<Event> {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
         self.update(devices, MOUSE, mouse.map(Value::Mouse), now, &mut events);
+        // (Neptune) The mouse looks around only while no controller is
+        // connected: a player with one uses the controller, and nudging the
+        // mouse must not turn the camera.
+        let any_pad = pads.iter().any(Option::is_some);
+        let pointer = if any_pad { Mouse::default() } else { pointer };
+        let keyboard = *KEYBOARD_FEEDS_PAD;
         if one_pad {
-            let pad = pads.into_iter().flatten().fold(fallback(&keys), merged);
+            let pad = pads
+                .into_iter()
+                .flatten()
+                .fold(stand_in(&keys, pointer, keyboard), merged);
             self.update(devices, FALLBACK, Some(Value::Pad(pad)), now, &mut events);
             self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
             return events;
         }
-        let any_pad = pads.iter().any(Option::is_some);
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        let fallback = (!any_pad).then(|| Value::Pad(stand_in(&keys, pointer, keyboard)));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events
@@ -1181,12 +1246,20 @@ pub(crate) fn module() -> HleModule {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use host::{raw_input, watch_raw_mouse};
+
 /// Host input: XInput pads, the keyboard while our process has focus.
 #[cfg(windows)]
 mod host {
     use std::time::{Duration, Instant};
 
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Input::{
+        GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+        RID_INPUT, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW,
     };
@@ -1248,7 +1321,18 @@ mod host {
         /// The input snapshot for this poll and the HID connection owning each slot.
         pads: [Option<PadState>; PADS],
         hid_slots: [Option<u64>; PADS],
+        /// The pad's mouse look: raw movement smoothed over a few polls.
+        look: (f32, f32),
+        /// The window had the focus at the last poll.
+        had_focus: bool,
+        /// The mouse's buttons are ignored until then: the click that brings
+        /// the window the focus is not a trigger pull.
+        triggers_from: Option<Instant>,
     }
+
+    /// The mouse's buttons stay ignored this long after the window takes the
+    /// focus, so the click that did it does not pull a trigger.
+    const TRIGGER_GRACE: Duration = Duration::from_millis(250);
 
     impl Host {
         fn xinput(&mut self, slot: usize) -> Option<PadState> {
@@ -1268,6 +1352,12 @@ mod host {
 
     impl Source for Host {
         fn mouse(&mut self) -> Option<MouseState> {
+            // The title reads a mouse device of its own only when asked for
+            // (`VICTORY_MOUSE_CAPTURE=1`); by default the mouse is the
+            // stand-in pad's right stick and triggers ([`Host::pointer`]).
+            if !crate::modules::lifecycle::mouse_capture_opt_in() {
+                return None;
+            }
             let delta = crate::modules::lifecycle::captured_mouse_delta()?;
             let menu_open = victory_gpu::SETTINGS_MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed);
             let buttons = if menu_open {
@@ -1279,6 +1369,55 @@ mod host {
             };
             Some(super::apply_mouse_sample(&mut self.mouse, delta, buttons, menu_open))
         }
+
+        /// (Neptune) The mouse looking around as the stand-in pad reads it: raw
+        /// movement is a stick (smoothed; `VICTORY_MOUSE` scales it, default 1),
+        /// the left button the right trigger, the right button the left one.
+        fn pointer(&mut self) -> Mouse {
+            // Raw movement is taken every poll, whether or not it is used: a
+            // look that starts later does not jump by what came before it.
+            let (dx, dy) = (
+                i64::from(RAW_DX.swap(0, Ordering::Relaxed)),
+                i64::from(RAW_DY.swap(0, Ordering::Relaxed)),
+            );
+            let menu_open = victory_gpu::SETTINGS_MENU_OPEN.load(Ordering::Relaxed);
+            let window_focused = focused();
+            if !super::mouse_look() || menu_open || !window_focused {
+                (self.look, self.had_focus, self.triggers_from) = ((0.0, 0.0), false, None);
+                return Mouse::default();
+            }
+            if !self.had_focus {
+                self.triggers_from = Some(Instant::now() + TRIGGER_GRACE);
+            }
+            self.had_focus = true;
+            let triggers = self.triggers_from.is_none_or(|at| Instant::now() >= at);
+            if triggers {
+                self.triggers_from = None;
+            }
+            // SAFETY: virtual-key state queries.
+            let (left, right) = unsafe { (GetAsyncKeyState(0x01) < 0, GetAsyncKeyState(0x02) < 0) };
+            // Raw input where the window has it; else the captured pointer's
+            // movement, which stops once the pointer reaches an edge.
+            let (dx, dy) = if RAW_MOUSE.load(Ordering::Relaxed) {
+                (dx, dy)
+            } else {
+                crate::modules::lifecycle::captured_mouse_delta().unwrap_or((0, 0))
+            };
+            // About 8 counts a poll (1000 a second) is the stick at its end.
+            const GAIN: f32 = 0.025;
+            static SCALE: LazyLock<f32> = LazyLock::new(|| {
+                std::env::var("VICTORY_MOUSE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1.0)
+            });
+            self.look.0 = self.look.0 * 0.8 + dx as f32 * GAIN * *SCALE;
+            self.look.1 = self.look.1 * 0.8 + dy as f32 * GAIN * *SCALE;
+            Mouse {
+                left: left && triggers,
+                right: right && triggers,
+                x: self.look.0.clamp(-1.0, 1.0),
+                y: (-self.look.1).clamp(-1.0, 1.0),
+            }
+        }
+
         fn pad(&mut self, slot: usize) -> Option<PadState> {
             // XInput first; HID PS5 pads take the slots XInput leaves free (`VICTORY_DUALSENSE`: 0 off, 1 both).
             if slot == 0 {
@@ -1373,10 +1512,11 @@ mod host {
         }
     }
 
-    /// A scripted key's virtual key: a letter, a digit, or `Enter`, `Esc`,
-    /// `Tab`, `Back`, `Up`, `Down`, `Left`, `Right`.
+    /// A scripted key's virtual key: a letter, a digit, or `Space`, `Enter`,
+    /// `Esc`, `Tab`, `Back`, `Up`, `Down`, `Left`, `Right`.
     fn key_code(name: &str) -> Option<u8> {
         Some(match name.trim() {
+            "Space" => 0x20,
             "Enter" => 0x0D,
             "Esc" => 0x1B,
             "Tab" => 0x09,
@@ -1525,6 +1665,51 @@ mod host {
         }
     }
 
+    /// (Neptune) Asks for raw mouse input on the title's window: movement then
+    /// keeps coming while the pointer is clipped to it and its position no
+    /// longer changes at an edge. Without it, looking around would stop at the
+    /// window's edge.
+    pub(crate) fn watch_raw_mouse(hwnd: HWND) {
+        if RAW_MOUSE.load(Ordering::Relaxed) {
+            return;
+        }
+        // Generic desktop page, mouse usage; delivered while the window is in front.
+        let device = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: 0, hwndTarget: hwnd };
+        // SAFETY: one device description of ours.
+        if unsafe { RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) } != 0 {
+            RAW_MOUSE.store(true, Ordering::Relaxed);
+            tracing::info!("gameinput: raw mouse input on the title's window");
+        } else {
+            tracing::warn!(error = %std::io::Error::last_os_error(), "gameinput: no raw mouse input");
+        }
+    }
+
+    /// Adds the movement of one `WM_INPUT` message.
+    pub(crate) fn raw_input(lparam: LPARAM) {
+        let mut raw = RAWINPUT::default();
+        let mut size = size_of::<RAWINPUT>() as u32;
+        // SAFETY: room for one input; the handle is the message's.
+        let got = unsafe {
+            GetRawInputData(
+                lparam as HRAWINPUT,
+                RID_INPUT,
+                (&raw mut raw).cast(),
+                &mut size,
+                size_of::<RAWINPUTHEADER>() as u32,
+            )
+        };
+        if got == 0 || got == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE {
+            return;
+        }
+        // SAFETY: a mouse input, by its header.
+        let mouse = unsafe { raw.data.mouse };
+        // Absolute positions (remote desktop, tablets) are not movement.
+        if mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0 {
+            RAW_DX.fetch_add(mouse.lLastX, Ordering::Relaxed);
+            RAW_DY.fetch_add(mouse.lLastY, Ordering::Relaxed);
+        }
+    }
+
     #[test]
     fn host_pads_convert_to_console_pads() {
         let pad = XINPUT_GAMEPAD {
@@ -1572,6 +1757,7 @@ mod tests {
     #[derive(Default)]
     struct FakeHost {
         mouse: Option<MouseState>,
+        pointer: Mouse,
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
         rumble: Vec<(usize, u16, u16)>,
@@ -1581,6 +1767,7 @@ mod tests {
 
     impl Source for Fake {
         fn mouse(&mut self) -> Option<MouseState> { self.0.lock().unwrap().mouse }
+        fn pointer(&mut self) -> Mouse { self.0.lock().unwrap().pointer }
         fn pad(&mut self, slot: usize) -> Option<PadState> {
             self.0.lock().unwrap().pads[slot]
         }
@@ -1719,6 +1906,52 @@ mod tests {
             Some(Provenance::Hle)
         );
         assert_eq!(r.classify("GameInput.dll", &ImportSymbol::Ordinal(2)), None);
+    }
+
+    #[test]
+    fn keyboard_off_leaves_the_stand_in_pad_at_rest() {
+        let keys = [b'W', A_KEY, b'E'].map(|vk| KeyState { virtual_key: vk, ..Default::default() });
+        let mouse = Mouse { left: true, right: true, x: 0.5, y: -0.25 };
+        assert_eq!(stand_in(&keys, mouse, false), PadState::default());
+        let on = stand_in(&keys, mouse, true);
+        assert_eq!(on, fallback(&keys, mouse));
+        assert!(on.buttons & A != 0 && on.left_y == 1.0 && on.left_trigger == 1.0 && on.right_x == 0.5);
+    }
+
+    #[test]
+    fn the_mouse_is_the_right_stick_and_the_triggers() {
+        let look = Mouse { left: true, right: false, x: 0.5, y: -0.25 };
+        let pad = fallback(&[], look);
+        assert_eq!((pad.right_trigger, pad.left_trigger), (1.0, 0.0));
+        assert_eq!((pad.right_x, pad.right_y), (0.5, -0.25));
+        let click = Mouse { left: false, right: true, ..Default::default() };
+        let pad = fallback(&[], click);
+        assert_eq!((pad.right_trigger, pad.left_trigger), (0.0, 1.0));
+    }
+
+    #[test]
+    fn the_mouse_feeds_the_one_pad_only_while_no_controller_is_connected() {
+        let (hub, host) = fake_with(true);
+        let pad_now = |hub: &Hub| match &hub.state().slots[FALLBACK].history.back().unwrap().value {
+            Value::Pad(p) => *p,
+            _ => unreachable!(),
+        };
+        host.lock().unwrap().pointer = Mouse { left: true, right: false, x: 0.5, y: -0.25 };
+        hub.poll();
+        let pad = pad_now(hub);
+        assert_eq!((pad.right_trigger, pad.right_x, pad.right_y), (1.0, 0.5, -0.25));
+        // A controller (in any slot) takes the mouse, but not the keyboard.
+        host.lock().unwrap().pads[1] = Some(PadState { buttons: A, ..Default::default() });
+        host.lock().unwrap().keys = vec![key(b'D')];
+        hub.poll();
+        let pad = pad_now(hub);
+        assert_eq!((pad.buttons, pad.right_trigger, pad.left_x), (A, 0.0, 1.0));
+        // And the mouse is back when it is off again.
+        host.lock().unwrap().pads[1] = None;
+        host.lock().unwrap().keys.clear();
+        hub.poll();
+        let pad = pad_now(hub);
+        assert_eq!((pad.buttons, pad.right_trigger, pad.right_x), (0, 1.0, 0.5));
     }
 
     #[test]

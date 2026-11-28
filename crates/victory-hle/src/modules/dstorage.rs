@@ -27,7 +27,7 @@ use std::ffi::{CStr, c_char, c_void};
 use std::os::windows::fs::FileExt;
 use std::os::windows::io::FromRawHandle;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 
 use victory_formats::bcpack::{self, Tables};
 
@@ -150,7 +150,13 @@ extern "system" fn open_file(_: Factory, path: *const u16, iid: *const Guid, out
     // SAFETY: a handle we just opened and nobody else owns.
     let file = unsafe { std::fs::File::from_raw_handle(handle) };
     let files = Files::new(file, Io::chosen());
-    let file = Instance::create(Object::new("dstorage file", &FILE_VTABLE), File { files });
+    let file = Instance::create(Object::new("dstorage file", &FILE_VTABLE), File {
+        files,
+        archive: std::path::Path::new(&name)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default(),
+    });
     if stream_log::on() {
         stream_log::line(format_args!("F\t{:x}\t{kept}", file as usize));
     }
@@ -278,6 +284,8 @@ static FACTORY_VTABLE: Methods<16> = Methods([
 
 struct File {
     files: Files,
+    /// The opened file's name, lower case (`data.rpf`), for stream replacements.
+    archive: String,
 }
 
 /// How files are read (`VICTORY_DSTORAGE_IO`).
@@ -1406,6 +1414,30 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         return into_destination(request, size, |out| read_into(request, out).map(|()| size))
             .map_err(|hr| fail(hr, "copying"));
     }
+    if options & ZLIB != 0 && bc == 0 && options & MEMORY_SOURCE == 0 {
+        // SAFETY: a file object we created; the title keeps it open.
+        let archive = &unsafe { &*request.source.cast::<Instance<File>>() }.state.archive;
+        if let Some(bytes) = replacement(archive, request.offset) {
+            if bytes.len() <= size {
+                let n = bytes.len();
+                into_destination(request, size, |out| {
+                    out[..n].copy_from_slice(bytes);
+                    out[n..].fill(0);
+                    Ok(out.len())
+                })
+                .map_err(|hr| fail(hr, "a replacement stream"))?;
+                tracing::debug!(archive, offset = request.offset, size, "dstorage: replacement served");
+                return Ok(());
+            }
+            tracing::warn!(
+                archive,
+                offset = request.offset,
+                replacement = bytes.len(),
+                destination_size = size,
+                "dstorage: a replacement stream is larger than the title's buffer; the original is read"
+            );
+        }
+    }
     let tables = if bc != 0 { Some(bcpack_tables()?) } else { None };
     let source = read_source(request).map_err(|hr| fail(hr, "reading the source"))?;
     // The console's order: zlib first, then BCPack.
@@ -1430,6 +1462,62 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         "dstorage: request done"
     );
     Ok(())
+}
+
+/// A zlib stream served from a file of the user's instead of the archive: the
+/// inflated bytes the title gets for a request at exactly that archive offset.
+struct Replacement {
+    archive: String,
+    offset: u64,
+    bytes: Vec<u8>,
+    served: AtomicBool,
+}
+
+/// (Neptune) `VICTORY_REPLACE_STREAMS`: `archive@offset=path` entries separated
+/// by `;`, e.g. `data.rpf@293433344=C:\mods\input_icons.gfx`. Read once; an
+/// entry that does not parse or whose file cannot be read is reported and
+/// skipped.
+static REPLACEMENTS: LazyLock<Vec<Replacement>> = LazyLock::new(|| {
+    std::env::var_os("VICTORY_REPLACE_STREAMS")
+        .map_or_else(Vec::new, |spec| load_replacements(&spec.to_string_lossy()))
+});
+
+/// Parses a replacement list and reads its files (`;`-separated
+/// `archive@offset=path` entries).
+fn load_replacements(spec: &str) -> Vec<Replacement> {
+    let mut table = Vec::new();
+    for entry in spec.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+        let parsed = entry.split_once('=').and_then(|(key, path)| {
+            let (archive, offset) = key.split_once('@')?;
+            Some((archive.trim().to_ascii_lowercase(), offset.trim().parse::<u64>().ok()?, path.trim()))
+        });
+        let Some((archive, offset, path)) = parsed else {
+            tracing::warn!(entry, "dstorage: a replacement entry is not archive@offset=path");
+            continue;
+        };
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                tracing::info!(archive, offset, path, size = bytes.len(), "dstorage: replacement stream loaded");
+                table.push(Replacement { archive, offset, bytes, served: AtomicBool::new(false) });
+            }
+            Err(error) => tracing::warn!(path, %error, "dstorage: a replacement file cannot be read"),
+        }
+    }
+    table
+}
+
+/// The replacement for the stream at `offset` of `archive`, if the user named one.
+fn replacement(archive: &str, offset: u64) -> Option<&'static [u8]> {
+    find_replacement(&REPLACEMENTS, archive, offset)
+}
+
+/// The replacement in `table` for the stream at `offset` of `archive`.
+fn find_replacement<'a>(table: &'a [Replacement], archive: &str, offset: u64) -> Option<&'a [u8]> {
+    let r = table.iter().find(|r| r.offset == offset && r.archive == archive)?;
+    if !r.served.swap(true, Ordering::Relaxed) {
+        tracing::info!(archive, offset, size = r.bytes.len(), "dstorage: replacement stream served");
+    }
+    Some(&r.bytes)
 }
 
 /// Inflates a zlib stream into `out`, returning the bytes written. A stream
@@ -2551,5 +2639,30 @@ mod tests {
         assert_eq!(inflate(&bad_body, &mut out), Err(INVALID_DATA));
         assert_eq!(inflate(&packed, &mut out), Ok(plain.len()));
         assert_eq!(out, plain);
+    }
+
+    /// (Neptune) `VICTORY_REPLACE_STREAMS`: entries parse, their files are
+    /// read, and a request's archive and offset find them.
+    #[test]
+    fn replacement_streams_are_parsed_and_found() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("victory-replace-{}.gfx", std::process::id()));
+        std::fs::write(&path, b"GFX\x02replacement").unwrap();
+        let missing = dir.join(format!("victory-replace-missing-{}.gfx", std::process::id()));
+        let spec = format!(
+            " data.rpf@293433344={} ; ; not-an-entry ; other.rpf@5={}",
+            path.display(),
+            missing.display()
+        );
+        let table = load_replacements(&spec);
+        assert_eq!(table.len(), 1, "only the readable entry loads");
+        assert_eq!((table[0].archive.as_str(), table[0].offset), ("data.rpf", 293433344));
+        assert_eq!(table[0].bytes, b"GFX\x02replacement");
+        // Found by archive (case-insensitive in the entry) and exact offset.
+        assert_eq!(find_replacement(&table, "data.rpf", 293433344), Some(&b"GFX\x02replacement"[..]));
+        assert!(table[0].served.load(Ordering::Relaxed), "a served stream is reported once");
+        assert_eq!(find_replacement(&table, "data.rpf", 0), None);
+        assert_eq!(find_replacement(&table, "other.rpf", 293433344), None);
+        std::fs::remove_file(&path).unwrap();
     }
 }
