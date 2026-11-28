@@ -265,9 +265,40 @@ sealed class Launch
         Def("seriesX", JsonValue.Create(false), "");
         Def("thin", JsonValue.Create(true), "额外绘制线程 开");
         Def("keyboard", JsonValue.Create(true), "");
-        Def("warmJobs", JsonValue.Create(ram > 0 && ram < 24 * GB ? Math.Max(2, Environment.ProcessorCount / 2) : 0), "");
         settings["autoTune"] = "1"; Save(); SendSettings();
         app.Out(notes.Count > 0 ? "\n已按本机配置自动优化：" + string.Join("、", notes) + "\n" : "\n已按本机配置检查：当前设置无需调整\n", "ok");
+    }
+
+    // (Victory) per-machine tuning v2: one rule table for every card, not only the 5090. The picked values are
+    // stored with a hardware signature, so a GPU/RAM/CPU change reruns it while a player's own edit is kept.
+    void AutoTuneBest(bool force)
+    {
+        const long GB = 1024L * 1024 * 1024;
+        string gpu = "", driver = ""; long vram = 0, ram = 0, ramFree = 0;
+        try { Gpu(ref gpu, ref driver, ref vram); } catch { }
+        try { Memory(ref ram, ref ramFree); } catch { }
+        var gen = Streamline.RtxGeneration(gpu);
+        var nv = gen >= 20 || Vendor() == "nvidia";
+        var big = vram >= 13 * GB;                 // 13 GB+: the Series X profile fits and gives a bigger texture budget
+        var vgb = vram > 0 ? vram / GB : 0;
+        var rgb = ram > 0 ? ram / GB : 0;
+        var sig = $"{gpu}|{vgb}G|{rgb}G|{Environment.ProcessorCount}";
+        if (!force && S("autoTuneSig") == sig) return;   // same machine and already tuned
+        var notes = new List<string>();
+        void Def(string key, JsonNode value, string why) { settings[key] = value; notes.Add(why); }
+        Def("seriesX", JsonValue.Create(big), big ? "Series X 档（显存大，纹理预算更高）" : "Series S 档（预算紧，最省显存）");
+        Def("vramSaver", JsonValue.Create(!big && vgb < 12), (big || vgb >= 12) ? "节省显存关" : "节省显存开");
+        Def("dlss", JsonValue.Create(nv), nv ? "DLSS 超分开" : "A/I 卡走 FSR（无 DLSS）");
+        var frames = nv ? (gen >= 40 ? 1 : (big ? 1 : 0)) : (vgb >= 8 ? 1 : 0);
+        Def("framegen", JsonValue.Create(frames), frames > 0 ? (nv ? "帧生成 2x（DLSS）" : "FSR 帧生成 2x") : "帧生成关（不满足条件）");
+        Def("thin", JsonValue.Create(!big), big ? "额外绘制线程关（优先画面与稳定）" : "额外绘制线程开");
+        Def("keyboard", JsonValue.Create(true), "键鼠映射开");
+        var tier = rgb > 0 && rgb < 16 ? "quiet" : (rgb >= 24 && Environment.ProcessorCount >= 12 && !big ? "turbo" : "balanced");
+        Def("warmTier", JsonValue.Create(tier), "默认预热档位：" + tier);
+        settings["autoTuneSig"] = sig; settings["autoTune"] = "1";
+        Save(); SendSettings();
+        app.Out("\n本机自适应配置（" + gpu + " / " + vgb + "G 显存 / " + rgb + "G 内存 / " + Environment.ProcessorCount + " 线程）：\n · "
+            + string.Join("\n · ", notes) + "\n（都可在设置里手改；换硬件后会自动重新选择）\n", "ok");
     }
 
     // (Victory) TDR: a GPU that does not answer within 2 s is reset by Windows (black screen). A longer limit helps
@@ -400,7 +431,7 @@ sealed class Launch
                 SendSettings();
                 break;
             }
-            case "autoTune": AutoTune(true); break;
+            case "autoTune": AutoTuneBest(true); break;
             case "setTdr": SetTdr((string?)m["value"] ?? "60"); break;
             case "setPagefile": SetPagefile(); break;
             case "pickCache":
@@ -669,6 +700,14 @@ sealed class Launch
             dlssOn = false;
             fgFrames = 0;
         }
+        // (Victory) AMD/Intel: FSR 3.1 frame generation needs the FidelityFX runtime shipped in amd-sdk
+        if (fgFrames > 0 && !nvidia &&
+            !File.Exists(Path.Combine(exeDir ?? "", "amd-sdk", "amd_fidelityfx_dx12.dll")) &&
+            !(S("fsrDll").Length > 0 && File.Exists(S("fsrDll"))))
+        {
+            fgFrames = 0;
+            notes.Add("FSR 帧生成未启用：缺少 amd-sdk\\amd_fidelityfx_dx12.dll（完整版包内有；或设置 › 画面 选择 FSR DLL）");
+        }
         if (dlssOn && !nvidia) { dlssOn = false; notes.Add("未检测到 NVIDIA 显卡：DLSS 已关闭（AMD/Intel 用 FSR）"); }
         if (dlssOn) { args.AddRange(["--dlss", S("dlssMode", "quality")]); env["VICTORY_DLSS"] = "1"; }
         if (fgFrames > 0 && nvidia && Rtx() is >= 20 and < 40)
@@ -814,6 +853,12 @@ sealed class Launch
                 if (val.Length == 0) env.Remove(kv.Key); else env[kv.Key] = val;
             }
         if (!B("thin", true)) env.Remove("VICTORY_THIN");
+        // (Victory) AMD/Intel: one submission ahead is the safer default (the device-removed reports were both vendors)
+        if (Vendor() != "nvidia" && env.TryGetValue("VICTORY_RELAY", out var relay) && relay == "2")
+        {
+            env["VICTORY_RELAY"] = "1";
+            notes?.Add("AMD/Intel 安全默认：提交队列 VICTORY_RELAY=1（更稳，帧数可能略降；F1 菜单可改回）");
+        }
         // (Victory) "跟随 F1": the in-game F1 menu owns the render switches; the launcher leaves only paths/tools
         if (F1Mode() == "f1" && notes != null)
         {
@@ -1541,7 +1586,7 @@ sealed class Launch
         app.Post(new JsonObject { ["type"] = "pc", ["gpu"] = gpu, ["driver"] = driver, ["vram"] = vram, ["ram"] = ram, ["ramFree"] = ramFree, ["disk"] = disk,
             ["cpu"] = Environment.ProcessorCount, ["rtx"] = Streamline.RtxGeneration(gpu) });
         // (Victory) first run on this machine: pick safe defaults from its own GPU/VRAM/RAM
-        if (S("autoTune").Length == 0) AutoTune(false);
+        AutoTuneBest(false);
     }
 #if WINDOWS
     // the display adapters' entries in the registry: the card with the most memory
