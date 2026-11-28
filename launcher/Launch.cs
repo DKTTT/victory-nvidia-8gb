@@ -276,26 +276,28 @@ sealed class Launch
         const long GB = 1024L * 1024 * 1024;
         string gpu = "", driver = ""; long vram = 0, ram = 0, ramFree = 0;
         try { Gpu(ref gpu, ref driver, ref vram); } catch { }
-        try { Memory(ref ram, ref ramFree); } catch { }
         var gen = Streamline.RtxGeneration(gpu);
         var nv = gen >= 20 || Vendor() == "nvidia";
-        var big = vram >= 13 * GB;                 // 13 GB+: the Series X profile fits and gives a bigger texture budget
+        long ram2 = 0, ramFree2 = 0;
+        try { Memory(ref ram2, ref ramFree2); } catch { }
         var vgb = vram > 0 ? vram / GB : 0;
-        var rgb = ram > 0 ? ram / GB : 0;
-        var sig = $"{gpu}|{vgb}G|{rgb}G|{Environment.ProcessorCount}";
-        if (!force && S("autoTuneSig") == sig) return;   // same machine and already tuned
-        var notes = new List<string>();
-        void Def(string key, JsonNode value, string why) { settings[key] = value; notes.Add(why); }
-        Def("seriesX", JsonValue.Create(big), big ? "Series X 档（显存大，纹理预算更高）" : "Series S 档（预算紧，最省显存）");
-        Def("vramSaver", JsonValue.Create(!big && vgb < 12), (big || vgb >= 12) ? "节省显存关" : "节省显存开");
-        Def("dlss", JsonValue.Create(nv), nv ? "DLSS 超分开" : "A/I 卡走 FSR（无 DLSS）");
-        var frames = nv ? (gen >= 40 ? 1 : (big ? 1 : 0)) : (vgb >= 8 ? 1 : 0);
-        Def("framegen", JsonValue.Create(frames), frames > 0 ? (nv ? "帧生成 2x（DLSS）" : "FSR 帧生成 2x") : "帧生成关（不满足条件）");
-        Def("thin", JsonValue.Create(!big), big ? "额外绘制线程关（优先画面与稳定）" : "额外绘制线程开");
-        Def("keyboard", JsonValue.Create(true), "键鼠映射开");
-        var tier = rgb > 0 && rgb < 16 ? "quiet" : (rgb >= 24 && Environment.ProcessorCount >= 12 && !big ? "turbo" : "balanced");
-        Def("warmTier", JsonValue.Create(tier), "默认预热档位：" + tier);
-        settings["autoTuneSig"] = sig; settings["autoTune"] = "1";
+        var rgb = ram2 > 0 ? ram2 / GB : 0;
+        var sig = $"{gpu}|{vgb}G|{Environment.ProcessorCount}";
+        if (!force && S("autoTuneSig") == sig) return;
+        // (Victory) only three things are fitted to the machine; everything else stays the player's choice:
+        //   - 节省显存: on below 12 GB of VRAM
+        //   - XSS/XSX: Series S unless the card has 13 GB+ (Series X then has a bigger budget)
+        //   - 帧生成后端: DLSS on NVIDIA RTX, FSR otherwise (XSS keeps its built-in FidelityFX upscaling either way)
+        settings["vramSaver"] = JsonValue.Create(vgb > 0 && vgb < 12);
+        settings["seriesX"] = JsonValue.Create(vgb >= 13);
+        settings["fgBackend"] = JsonValue.Create(nv ? "dlss" : "fsr");
+        var notes = new List<string>
+        {
+            settings["vramSaver"]!.GetValue<bool>() ? "节省显存：开（显存 < 12G）" : "节省显存：关",
+            settings["seriesX"]!.GetValue<bool>() ? "档位：XSX（显存 13G+，预算更高）" : "档位：XSS（默认，含内置 FSR 超分，保持开启）",
+            nv ? "帧生成后端：DLSS" : "帧生成后端：FSR",
+        };
+settings["autoTuneSig"] = sig; settings["autoTune"] = "1";
         Save(); SendSettings();
         app.Out("\n本机自适应配置（" + gpu + " / " + vgb + "G 显存 / " + rgb + "G 内存 / " + Environment.ProcessorCount + " 线程）：\n · "
             + string.Join("\n · ", notes) + "\n（都可在设置里手改；换硬件后会自动重新选择）\n", "ok");

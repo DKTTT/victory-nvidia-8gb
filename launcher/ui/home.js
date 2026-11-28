@@ -542,7 +542,7 @@ const SECTIONS = {
     row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '开始预热'}</button>`),
     // (Victory) the shader cache can be GBs: keep it off the C drive by default, and let the player move it
     // (Victory) auto tune from the machine, plus the two system buttons people need for "no picture / crash"
-    row('按本机配置优化', '根据显卡/显存/物理内存自动选择：节省显存、DLSS 或 FSR 帧生成、预热线程等。会覆盖你手动改过的这些项。',
+    row('按本机配置优化', '只自动决定三项：节省显存（显存<12G 开）、XSS/XSX（13G+ 用 XSX，否则 XSS 并保留内置 FSR 超分）、帧生成后端（N 卡 DLSS，其他 FSR）。其他设置完全由你决定。',
       '<button class="mini" data-act="autoTune">重新优化</button>'),
     row('显卡超时 (TDR)', '有些显卡在编译着色器时会"掉驱动/黑屏"。把 Windows 的 TDR 超时调大（默认约 2 秒）。需要管理员权限，重启后生效。',
       '<div class="acts"><button class="mini" data-act="tdr60">设为 60 秒</button><button class="mini" data-act="tdrOff">恢复默认</button></div>'),
