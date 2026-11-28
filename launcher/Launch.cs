@@ -85,6 +85,7 @@ sealed class Launch
             ["dlssOn"] = B("dlss", false) && Rtx() >= 20,
             ["vendor"] = Vendor(), ["gpuName"] = GpuName(), ["os"] = Environment.OSVersion.VersionString,
             ["sm86"] = Sm86Dir() != null,
+            ["cacheDir"] = CacheDir(PayloadDir ?? Bundled),
             ["sl"] = SlStatus(),
             ["history"] = HistoryCopy(),
             // (Neptune) cold, failed, build, flags or warm, and the key it was judged by
@@ -153,6 +154,34 @@ sealed class Launch
             if (File.Exists(Path.Combine(d, "version.dll"))) return d;
         }
         return null;
+    }
+    // (Victory) where shaders/pipelines are cached: the player's choice, else the game's drive (when it is not C),
+    // else the fixed non-C drive with the most free space; C only when there is no other usable drive.
+    string DefaultCacheDir()
+    {
+        try
+        {
+            var gameRoot = Path.GetPathRoot(Path.GetFullPath(S("game")));
+            if (gameRoot is { Length: > 2 } && !gameRoot.StartsWith("C:", StringComparison.OrdinalIgnoreCase))
+                return Path.Combine(gameRoot, "VictoryCache");
+            DriveInfo? best = null;
+            foreach (var d in DriveInfo.GetDrives())
+            {
+                if (!d.IsReady || d.DriveType != DriveType.Fixed) continue;
+                if (d.Name.StartsWith("C:", StringComparison.OrdinalIgnoreCase)) continue;
+                if (d.AvailableFreeSpace < 8L * 1024 * 1024 * 1024) continue;
+                if (best == null || d.AvailableFreeSpace > best.AvailableFreeSpace) best = d;
+            }
+            if (best != null) return Path.Combine(best.Name, "VictoryCache");
+        }
+        catch { }
+        return "";
+    }
+    string CacheDir(string home)
+    {
+        if (S("cacheDir") is { Length: > 0 } chosen) return chosen;
+        var auto = DefaultCacheDir();
+        return auto.Length > 0 ? auto : Path.Combine(home, "cache");
     }
     string? vendorCached;
     string Vendor()
@@ -270,6 +299,23 @@ sealed class Launch
             case "set":
                 foreach (var kv in m["values"]!.AsObject()) settings[kv.Key] = kv.Value?.DeepClone();
                 Save(); SendSettings(); break;
+            case "pickCache":
+                if (app.Host.PickFolder("选择着色器缓存文件夹（换位置后需要重新预热）") is string cd && cd.Length > 0)
+                {
+                    settings["cacheDir"] = cd;
+                    Save(); SendSettings();
+                    app.Out("\n缓存目录已改为 " + cd + "：请重新预热一次。\n", "h");
+                }
+                break;
+            case "openCache":
+                try
+                {
+                    var dir = CacheDir(PayloadDir ?? Bundled);
+                    Directory.CreateDirectory(dir);
+                    Open(dir);
+                }
+                catch (Exception e) { app.Out("\n打开缓存目录失败：" + e.Message + "\n", "bad"); }
+                break;
             case "resetF1":
                 try
                 {
@@ -609,7 +655,7 @@ sealed class Launch
         var pinned = Pinned("victory-cache.txt");
         var home = File.Exists(Path.Combine(Bundled, "victory.exe")) ? Bundled : (PayloadDir ?? Bundled);
         if (!env.ContainsKey("VICTORY_CACHE_DIR"))
-            env["VICTORY_CACHE_DIR"] = WinPath(pinned ?? Path.Combine(home, "cache"));
+            env["VICTORY_CACHE_DIR"] = WinPath(pinned ?? CacheDir(home));
         // (Victory) the save data root: the auto-found/selected dataDir, else %LOCALAPPDATA%\victory\data
         env["VICTORY_DATA_DIR"] = WinPath(S("dataDir") is { Length: > 0 } dataDir
             ? dataDir

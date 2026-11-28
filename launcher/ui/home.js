@@ -28,6 +28,8 @@ let S = { settings: {}, history: {} };  // settings, running state, history
 let PC = null;                          // the PC checks
 let SV = null;                          // the save manager's list
 let job = null;                         // a step running (warm-up)
+let JOB_T = 0;                         // when the warm-up started (for the elapsed clock)
+let JOB_TICK = null;
 // (Victory) a Play is starting: { t, step, detail } — disables the button and shows where it is
 let STARTING = null;
 let START_TICK = null;
@@ -37,7 +39,8 @@ let warm = freshWarm();                 // the warm-up's progress, from its outp
 // (Victory) the warm-up's progress, worked out once for every place that shows it
 function warmProgress() {
   const w = warm;
-  if (w.total === null) return { pct: null, zero: false, line: '正在准备着色器…', value: '预热中…', small: '启动中' };
+  const elapsed = JOB_T ? `（已运行 ${Math.max(1, Math.round((Date.now() - JOB_T) / 60000))} 分钟）` : '';
+  if (w.total === null) return { pct: null, zero: false, line: '正在准备着色器…' + elapsed, value: '预热中…', small: '启动中' };
   if (w.total === 0) {
     const t = '这个版本已经预热完成';
     return { pct: 100, zero: true, line: t, value: '已准备', small: t };
@@ -507,6 +510,9 @@ const SECTIONS = {
     row('预热线程数', `同时预热多少个着色器。全部 ${S.cores || ''} 个最快；一半（默认）占用更少内存，电脑仍可正常使用。`,
       `<div class="seg" role="radiogroup" aria-label="预热线程数">${[['half', S.warmJobsDefault], ['all', S.cores]].map(([k, n]) => `<button data-jobs="${n}" class="${(st('warmJobs', 0) || S.warmJobsDefault) == n ? 'on' : ''}">${k === 'half' ? '一半' : '全部'} (${n})</button>`).join('')}</div>`),
     row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '开始预热'}</button>`),
+    // (Victory) the shader cache can be GBs: keep it off the C drive by default, and let the player move it
+    row('缓存目录', '着色器/管线缓存（可达数 GB）。默认放在游戏所在盘；没有的话放在剩余空间最大的非 C 盘，只有单一 C 盘时才放 C 盘。换位置后需要重新预热。',
+      '<div class="acts"><button class="mini" data-act="pickCache">更改…</button><button class="mini" data-act="openCache">打开</button></div>', pathCode('cacheDir')),
   ]],
   // (Victory) keyboard and mouse drive a stand-in pad while no controller is connected
   controls: () => ['操作', '更改将在下次开始游戏时生效。', [
@@ -676,6 +682,8 @@ document.addEventListener('click', (e) => {
     case 'warm': return send({ cmd: 'launch.warm', id: ID });
     case 'getSl': SL = { state: 'progress', text: '启动中…' }; renderSettings(); return send({ cmd: 'launch.getStreamline' });
     case 'logs': return send({ cmd: 'launch.openLogs' });
+    case 'pickCache': return send({ cmd: 'launch.pickCache' });
+    case 'openCache': return send({ cmd: 'launch.openCache' });
     case 'exportLogs': return send({ cmd: 'launch.exportLogs' });
     case 'doc': return send({ cmd: 'launch.openDoc', key: act.dataset.key });
     case 'saves': closeSettings(); return show('saves');
@@ -763,8 +771,8 @@ window.vismReceive = (m) => {
       renderHome();
       break;
     case 'job':
-      if (m.state === 'start') { job = m.label; warm = freshWarm(); }
-      else job = null;
+      if (m.state === 'start') { job = m.label; warm = freshWarm(); JOB_T = Date.now(); if (!JOB_TICK) JOB_TICK = setInterval(() => { if (job) renderHome(); }, 5000); }
+      else { job = null; JOB_T = 0; if (JOB_TICK) { clearInterval(JOB_TICK); JOB_TICK = null; } }
       renderHome();
       if (!$('#welcome').hidden) renderWelcome();
       break;
