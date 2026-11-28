@@ -427,6 +427,9 @@ const SECTIONS = {
     ...(A.os === 'linux' ? [row('运行器', '在 Linux 上如何启动 victory.exe：wine，或 Proton 命令（如 <code>umu-run</code>）',
       `<input class="field runner" data-text="wine" value="${esc(st('wine', ''))}" placeholder="wine" spellcheck="false">`)] : []),
     row('重新设置', '再次显示欢迎步骤', '<button class="mini" data-act="welcome">打开</button>'),
+    // (Victory) the docs shipped with the release: opened from the package folder or the single exe's payload
+    row('教程与说明', '从零开始教程、启动器说明与修改器说明（随发行包提供）',
+      '<div class="acts"><button class="mini" data-act="doc" data-key="tutorial">教程</button><button class="mini" data-act="doc" data-key="readme">启动器说明</button><button class="mini" data-act="doc" data-key="trainer">修改器</button></div>'),
   ]],
   graphics: () => ['画面', '更改将在下次开始游戏时生效。', [
     row('模式', '快速：Series S，使用游戏自带分辨率和超分。清晰：Series X，速度较慢。',
@@ -454,6 +457,10 @@ const SECTIONS = {
   ]],
   logs: () => ['日志与问题报告', '每次运行都会写入日志。提交问题报告时请一并发送。', [
     row('日志文件夹', '上次运行的完整输出', '<button class="mini" data-act="logs">打开</button>'),
+    // (Victory) shipped docs: a single-exe release extracts them into its payload and opens them from there
+    row('从零开始教程', '新玩家的完整步骤（随启动器附带）', '<button class="mini" data-act="doc" data-key="tutorial">打开</button>'),
+    row('启动器说明', '启动器与文件说明（README-中文.txt）', '<button class="mini" data-act="doc" data-key="readme">打开</button>'),
+    row('修改器说明', '内置修改器（F4）的按键与用法', '<button class="mini" data-act="doc" data-key="trainer">打开</button>'),
   ]],
 };
 function renderSettings(animate) {
@@ -596,6 +603,7 @@ document.addEventListener('click', (e) => {
     case 'warm': return send({ cmd: 'launch.warm', id: ID });
     case 'getSl': SL = { state: 'progress', text: '启动中…' }; renderSettings(); return send({ cmd: 'launch.getStreamline' });
     case 'logs': return send({ cmd: 'launch.openLogs' });
+    case 'doc': return send({ cmd: 'launch.openDoc', key: act.dataset.key });
     case 'saves': closeSettings(); return show('saves');
     case 'saveFolder': return send({ cmd: 'openFolder' });
     case 'welcome': closeSettings(); return welcome(true);

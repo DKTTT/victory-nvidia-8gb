@@ -6,7 +6,7 @@ namespace Neptune;
 // GTK owns the window and dialogs. WebKit hosts the same bundled page as WebView2.
 sealed class LinuxHost(bool test, string? saveDirectory) : IDesktopHost
 {
-    readonly string page = new Uri(Path.Combine(AppContext.BaseDirectory, "ui", App.Page)).AbsoluteUri;
+    readonly string page = new Uri(Path.Combine(Payload.UiDir, App.Page)).AbsoluteUri;
     readonly List<Delegate> signalHandlers = [];
     readonly int uiThread = Environment.CurrentManagedThreadId;
     App controller = null!;
@@ -39,7 +39,7 @@ sealed class LinuxHost(bool test, string? saveDirectory) : IDesktopHost
         Connect(window, "window-state-event", new StateCallback(StateChanged));
         gtk_window_set_position(window, 1); // GTK_WIN_POS_CENTER
         // GTK reads SVG icons through gdk-pixbuf
-        gtk_window_set_icon_from_file(window, Path.Combine(AppContext.BaseDirectory, "ui", "neptune-vi-icon.svg"), IntPtr.Zero);
+        gtk_window_set_icon_from_file(window, Path.Combine(Payload.UiDir, "victory-icon.svg"), IntPtr.Zero);
         Connect(window, "destroy", new DestroyCallback((_, _) => { closed = true; gtk_main_quit(); }));
 
         var context = webkit_web_context_new_ephemeral();

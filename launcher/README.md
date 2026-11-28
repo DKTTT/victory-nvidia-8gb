@@ -20,14 +20,35 @@ GTA6 CN 的图形启动器：选游戏目录、开始游戏、预热着色器（
 
 ## 构建
 
-需要 .NET 8 SDK：
+需要 .NET 8 SDK。
 
-``
+普通（开发）版：一个自包含 exe（约 75 MB），`ui` 文件夹放在它旁边：
+
+```
 powershell -ExecutionPolicy Bypass -File .\build.ps1
-``
+```
 
 产物 `dist\VictoryLauncher.exe` + `dist\ui\` + `dist\victory.ico`，和 `victory.exe`
 放同一目录即用。
+
+单文件发行版：把内核、`ui`、`amd-sdk`、`shvi` 和说明文档都打进 exe，玩家只看到一个
+`VictoryLauncher.exe`：
+
+```
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -Bundle E:\path\to\package
+```
+
+- 内核取自本仓库 `target\release\victory.exe`（没有则用包里的），`amd-sdk`、`shvi`、
+  文档与 `启动-*.bat`、`README-中文.txt` 等取自 `-Bundle` 指向的包目录（先删掉旧的
+  `payload\` 与 `payload.zip` 再重新暂存，两者都在 `.gitignore` 里）。
+- 打包后的 exe 第一次运行会把内置 zip 解到
+  `%LOCALAPPDATA%\VictoryLauncher\payload-<版本>-<内容哈希>\`（写入 `.payload-stamp`；
+  同样的 exe 下次直接跳过，重新构建后内容哈希变化会解到新目录，旧目录在下次启动时清掉）。
+  内核、`ui`、`amd-sdk`、`shvi`、文档都从该目录取；WebView2 也映射该目录下的 `ui\`。
+- 旁边有真的 `victory.exe` / `ui\` 时仍优先用旁边的（完整包目录、开发调试的覆盖方式，
+  和以前一样）。`nvidia-sdk\`、`dlssg-sm86\` 不打进 exe：需要时放在 exe 旁边或解出的
+  payload 目录里即可。
+- `dist\` 里连 `ui\`、`*.txt`、`*.bat` 都不留，只有 `VictoryLauncher.exe`。
 
 ## 测试钩子
 

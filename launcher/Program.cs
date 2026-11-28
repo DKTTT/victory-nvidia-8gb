@@ -27,6 +27,8 @@ static class Program
 #endif
             return 0;
         }
+        // a -Bundle build unpacks its release before the window opens (the first start after a build only)
+        Payload.Prepare();
 #if WINDOWS
         ApplicationConfiguration.Initialize();
         Application.Run(new WindowsHost(test));

@@ -77,7 +77,7 @@ sealed class Launch
             ["gameOk"] = File.Exists(S("game")) && Path.GetFileName(S("game")).Equals("game_scarlett_master.exe", StringComparison.OrdinalIgnoreCase),
             ["running"] = game != null, ["runningId"] = gameId, ["busy"] = job != null,
             ["warmJobsDefault"] = Math.Max(2, Environment.ProcessorCount / 2), ["cores"] = Environment.ProcessorCount,
-            ["filesOk"] = ReleaseDir() != null, ["bundled"] = File.Exists(Path.Combine(Bundled, "victory.exe")),
+            ["filesOk"] = ReleaseDir() != null, ["bundled"] = BundledRelease,
             ["fsrOk"] = S("fsrDll").Length == 0 || File.Exists(S("fsrDll")),
             ["dlssOn"] = B("dlss", false) && Rtx() >= 20,
             ["sl"] = SlStatus(),
@@ -187,6 +187,8 @@ sealed class Launch
             case "stop": stopping = true; try { game?.Kill(true); } catch { } break;
             case "cancelJob": try { job?.Kill(true); } catch { } break;
             case "openLogs": Directory.CreateDirectory(logDir); Open(logDir); break;
+            // (Victory) the docs shipped with the release: opened from the package folder or the extracted payload
+            case "openDoc": OpenDoc((string?)m["key"] ?? ""); break;
             case "pcinfo": _ = Task.Run(SendPcInfo); break;
             // (Neptune) the only download of NVIDIA's files: on the player's click
             case "getStreamline":
@@ -205,6 +207,10 @@ sealed class Launch
     // the release this launcher came in: it ships beside victory.exe. A folder chosen in
     // Settings is only for a launcher that isn't in a release folder (testing from a build).
     static string Bundled => AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+    // a single-exe build (-Bundle) carries its release inside the exe: Payload extracts it to %LOCALAPPDATA%
+    static string? PayloadDir => Payload.Root;
+    // this launcher carries its own release: a package folder (victory.exe beside it) or the extracted payload
+    static bool BundledRelease => File.Exists(Path.Combine(Bundled, "victory.exe")) || PayloadDir != null;
     // built from a source tree (launcher\dist\ProjectNeptuneVI): the tree's root, where Neptune-Launcher.cmd is
     static string Tree => Path.GetFullPath(Path.Combine(Bundled, "..", "..", ".."));
     // (Neptune) the first line of a text file beside Neptune-Launcher.cmd (or in the chosen Neptune folder, or
@@ -215,6 +221,8 @@ sealed class Launch
     public string? ReleaseDir()
     {
         if (File.Exists(Path.Combine(Bundled, "victory.exe"))) return Bundled;
+        // a -Bundle build: victory.exe, ui, amd-sdk and shvi came out of the exe's payload
+        if (PayloadDir is string payload && File.Exists(Path.Combine(payload, "victory.exe"))) return payload;
         var tree = Tree;
         var chosen = S("neptuneDir");
         // (Neptune) neptune-build.txt beside Neptune-Launcher.cmd: one line, the folder of a victory.exe built
@@ -375,22 +383,25 @@ sealed class Launch
         foreach (var (n, v, _) in Preset(play)) env[n] = v;
         // (GTA6 CN) the console profile is a flag of `play`, not an env switch
         console.AddRange([B("seriesX", false) ? "--series-x" : "--series-s"]);
-        // victory-cache.txt beside the launcher: one line, the cache folder
+        // victory-cache.txt beside the launcher: one line, the cache folder; a single-exe build keeps the
+        // cache in its extracted payload, not in whatever folder the player happened to launch from
         var pinned = Pinned("victory-cache.txt");
+        var home = File.Exists(Path.Combine(Bundled, "victory.exe")) ? Bundled : (PayloadDir ?? Bundled);
         if (!env.ContainsKey("VICTORY_CACHE_DIR"))
-            env["VICTORY_CACHE_DIR"] = WinPath(pinned ?? Path.Combine(Bundled, "cache"));
+            env["VICTORY_CACHE_DIR"] = WinPath(pinned ?? Path.Combine(home, "cache"));
         env["VICTORY_DATA_DIR"] = WinPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "data"));
         env["VICTORY_GAME_DIR"] = WinPath(Path.GetDirectoryName(Path.GetFullPath(S("game")))!);
-        // the package's own upscaler / frame-generation folders, beside victory.exe
-        if (exeDir.Length > 0)
+        // the release's own upscaler / frame-generation folders, beside victory.exe (the package folder or
+        // the extracted payload), then optional drop-in folders beside a single-exe launcher as an override
+        foreach (var baseDir in new[] { exeDir, Bundled }.Where(d => d.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var amd = Path.Combine(exeDir, "amd-sdk");
+            var amd = Path.Combine(baseDir, "amd-sdk");
             if (Directory.Exists(amd) && !env.ContainsKey("VICTORY_FSR_DIR")) env["VICTORY_FSR_DIR"] = WinPath(amd);
-            var sm86 = Path.Combine(exeDir, "dlssg-sm86");
+            var sm86 = Path.Combine(baseDir, "dlssg-sm86");
             if (Directory.Exists(sm86) && !env.ContainsKey("VICTORY_DLSSG_SM86_DIR")) env["VICTORY_DLSSG_SM86_DIR"] = WinPath(sm86);
             foreach (var n in new[] { "nvidia-sdk", "dlssg-sm86", "dlssg", "streamline" })
             {
-                var d = Path.Combine(exeDir, n);
+                var d = Path.Combine(baseDir, n);
                 if (Directory.Exists(d) && !env.ContainsKey("VICTORY_STREAMLINE_DIR")) { env["VICTORY_STREAMLINE_DIR"] = WinPath(d); break; }
             }
         }
@@ -883,6 +894,37 @@ sealed class Launch
             app.Out($"无法启动 {file}：{e.Message}\n", "bad");
             app.Post(new JsonObject { ["type"] = "job", ["state"] = "end", ["label"] = label, ["code"] = -1 });
         }
+    }
+
+    // ---- (Victory) the docs that ship with the release: 教程 / 启动器说明 / 修改器说明 / BUILD-INFO ----
+    static readonly (string key, string name, string[] patterns)[] Docs =
+    [
+        ("tutorial", "从零开始教程", ["从零开始教程*.txt"]),
+        ("readme", "启动器说明", ["README*.txt"]),
+        ("trainer", "修改器说明", ["修改器说明*.txt"]),
+        ("buildinfo", "构建信息", ["BUILD-INFO*.txt"]),
+        ("changelog", "更新说明", ["更新说明*.txt"]),
+    ];
+    // a package folder keeps them beside the launcher; a single-exe build extracted them into its payload
+    IEnumerable<string> DocDirs()
+    {
+        yield return Bundled;
+        if (ReleaseDir() is string release) yield return release;
+        if (PayloadDir is string payload) yield return payload;
+    }
+    void OpenDoc(string key)
+    {
+        var doc = Docs.FirstOrDefault(d => d.key == key);
+        if (doc.key == null) return;
+        foreach (var dir in DocDirs().Distinct(StringComparer.OrdinalIgnoreCase))
+            foreach (var pattern in doc.patterns)
+                try
+                {
+                    var file = Directory.GetFiles(dir, pattern).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+                    if (file != null) { Open(file); return; }
+                }
+                catch { }
+        app.Out($"\n没有找到“{doc.name}”：它应随发行包一起提供（启动器文件夹或解出的 payload 中）。\n", "bad");
     }
 
     static void Open(string path) { try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); } catch { } }

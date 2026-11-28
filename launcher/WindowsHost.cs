@@ -8,14 +8,14 @@ namespace Neptune;
 sealed class WindowsHost : Form, IDesktopHost
 {
     readonly WebView2 ui = new();
-    readonly string root = AppContext.BaseDirectory;
     readonly App controller;
 
     public WindowsHost(bool test)
     {
         controller = new App(this, test, null);
         Text = App.Title + (test ? "（测试配置）" : "");
-        try { Icon = new Icon(Path.Combine(root, "victory.ico")); } catch { }
+        try { Icon = new Icon(Payload.IconFile ?? Path.Combine(AppContext.BaseDirectory, "victory.ico")); }
+        catch { try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { } }
         BackColor = Color.FromArgb(0x11, 0x11, 0x15);
         ClientSize = new Size(1240, 800);
         MinimumSize = new Size(960, 600);
@@ -119,7 +119,7 @@ sealed class WindowsHost : Form, IDesktopHost
         var env = await CoreWebView2Environment.CreateAsync(null, controller.ProfileDirectory);
         await ui.EnsureCoreWebView2Async(env);
         var core = ui.CoreWebView2;
-        core.SetVirtualHostNameToFolderMapping("app.neptune", Path.Combine(root, "ui"), CoreWebView2HostResourceAccessKind.Allow);
+        core.SetVirtualHostNameToFolderMapping("app.neptune", Payload.UiDir, CoreWebView2HostResourceAccessKind.Allow);
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         try { core.Settings.IsNonClientRegionSupportEnabled = true; } catch { }   // the header's app-region: drag

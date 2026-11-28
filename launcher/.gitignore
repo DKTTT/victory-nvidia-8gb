@@ -2,3 +2,6 @@ bin/
 obj/
 dist/
 *.pdb
+# build.ps1 -Bundle staging: the release files staged for embedding, and the zip built from them
+payload/
+payload.zip
