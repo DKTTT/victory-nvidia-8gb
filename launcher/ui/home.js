@@ -533,6 +533,9 @@ const SECTIONS = {
       `<div class="seg" role="radiogroup" aria-label="预热线程数">${[['half', S.warmJobsDefault], ['all', S.cores]].map(([k, n]) => `<button data-jobs="${n}" class="${(st('warmJobs', 0) || S.warmJobsDefault) == n ? 'on' : ''}">${k === 'half' ? '一半' : '全部'} (${n})</button>`).join('')}</div>`),
     row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '开始预热'}</button>`),
     // (Victory) the shader cache can be GBs: keep it off the C drive by default, and let the player move it
+    // (Victory) F1 vs launcher: one owner for the render switches, never two fighting silently
+    row('F1 菜单设置', '游戏内 F1 菜单和启动器都能改渲染设置。跟随启动器（推荐）：以启动器为准，F1 里的重复项会被接管；跟随 F1：启动器不下发渲染开关，以 F1 保存的为准。帧生成/DLSS 两项始终校验，避免黑屏。',
+      `<div class="seg" role="radiogroup" aria-label="F1 菜单设置"><button data-f1m="launcher" class="${st('f1Mode', 'launcher') === 'launcher' ? 'on' : ''}">跟随启动器</button><button data-f1m="f1" class="${st('f1Mode', 'launcher') === 'f1' ? 'on' : ''}">跟随 F1</button></div>`),
     row('缓存目录', '着色器/管线缓存（可达数 GB）。默认放在游戏所在盘；没有的话放在剩余空间最大的非 C 盘，只有单一 C 盘时才放 C 盘。换位置后需要重新预热。',
       `<div class="acts"><button class="mini" data-act="pickCache">更改…</button><button class="mini" data-act="openCache">打开</button><button class="mini" data-act="clearCache" ${S.running || job ? 'disabled' : ''}>清理…</button></div>`, pathCode('cacheDir')),
   ]],
@@ -687,6 +690,7 @@ document.addEventListener('click', (e) => {
     return send({ cmd: 'launch.findSaves' });
   }
   const pd = t.closest('[data-pickdir]'); if (pd) return send({ cmd: 'launch.pickFolder', key: pd.dataset.pickdir, title: pd.dataset.title || (pd.dataset.pickdir === 'neptuneDir' ? 'GTA6 CN · Victory 文件夹' : 'OptiScaler 文件夹') });
+  const fm = t.closest('[data-f1m]'); if (fm) { set({ f1Mode: fm.dataset.f1m }); return renderSettings(); }
   const fgb = t.closest('[data-fg]'); if (fgb) { set({ framegen: +fgb.dataset.fg }); SL = null; return renderSettings(); }
   const pf = t.closest('[data-pickfile]'); if (pf) return send({ cmd: 'launch.pickFile', key: pf.dataset.pickfile });
   const cl = t.closest('[data-clear]'); if (cl) { set({ [cl.dataset.clear]: '' }); return renderSettings(); }

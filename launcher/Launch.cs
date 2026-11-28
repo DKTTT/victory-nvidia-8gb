@@ -509,6 +509,14 @@ sealed class Launch
         ("VICTORY_LOG", "warn", ""),
     ];
     public static List<(string name, string value, string note)> Preset(string? _) => [.. Switches];
+    // (Victory) F1 menu vs launcher settings: which one owns the render switches the launcher passes
+    string F1Mode() => S("f1Mode", "launcher");
+    static HashSet<string> ManagedKeys() => Switches.Select(s => s.Item1).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    static readonly HashSet<string> AlwaysKept = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "VICTORY_CACHE_DIR", "VICTORY_DATA_DIR", "VICTORY_GAME_DIR", "VICTORY_LOG",
+        "VICTORY_KEYBOARD", "VICTORY_LOAD_DLLS", "VICTORY_REPLACE_STREAMS", "VICTORY_GPU",
+    };
     static JsonArray PresetJson(string? playPs1)
     {
         var a = new JsonArray();
@@ -560,6 +568,7 @@ sealed class Launch
                 var risky = new[] { "VICTORY_FRAMEGEN", "VICTORY_FRAMEGEN_X", "VICTORY_FRAMEGEN_BACKEND", "VICTORY_DLSS", "VICTORY_DLSS_PRESET", "VICTORY_MENU_FRAMEGEN", "VICTORY_MENU_FG_TYPE", "VICTORY_MENU_DLSS" };
                 var kept = new List<string>();
                 var dropped = 0;
+                var managed = 0;
                 foreach (var raw in File.ReadAllLines(f1))
                 {
                     var t = raw.Trim();
@@ -567,13 +576,17 @@ sealed class Launch
                     var eq = t.IndexOf('=');
                     var envKey = (eq >= 0 ? t.Substring(0, eq) : t).Trim().ToUpperInvariant();
                     if (Array.IndexOf(risky, envKey) >= 0) { dropped++; continue; }
+                    if (F1Mode() == "launcher" && ManagedKeys().Contains(envKey)) { managed++; continue; }
                     kept.Add(raw);
                 }
-                if (dropped > 0)
+                if (dropped + managed > 0)
                 {
                     File.Copy(f1, f1 + ".bak", true);
                     File.WriteAllLines(f1, kept);
-                    app.Out(string.Format("\nF1 菜单里 {0} 项旧帧生成/DLSS 设置已忽略（原文件备份为 victory-settings.txt.bak），其余设置保留\n", dropped), "h");
+                    if (dropped > 0)
+                        app.Out(string.Format("\nF1 菜单里 {0} 项旧帧生成/DLSS 设置已忽略（原文件备份为 victory-settings.txt.bak），其余设置保留\n", dropped), "h");
+                    if (managed > 0)
+                        app.Out(string.Format("\nF1 菜单里有 {0} 项与启动器重复的渲染设置已由启动器接管（设置 › 性能 › F1 菜单设置 可改为跟随 F1）\n", managed), "h");
                 }
             }
         }
@@ -739,6 +752,14 @@ sealed class Launch
                 if (val.Length == 0) env.Remove(kv.Key); else env[kv.Key] = val;
             }
         if (!B("thin", true)) env.Remove("VICTORY_THIN");
+        // (Victory) "跟随 F1": the in-game F1 menu owns the render switches; the launcher leaves only paths/tools
+        if (F1Mode() == "f1" && notes != null)
+        {
+            var removed = 0;
+            foreach (var name in ManagedKeys())
+                if (!AlwaysKept.Contains(name) && env.Remove(name)) removed++;
+            if (removed > 0) notes.Add($"F1 优先：启动器的 {removed} 项渲染开关未下发，渲染设置以游戏内 F1 菜单为准");
+        }
         // (Victory) the bundled script hook + trainer: F4 in game
         if (B("trainer", false) && exeDir.Length > 0)
         {
