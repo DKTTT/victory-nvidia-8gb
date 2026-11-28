@@ -858,6 +858,21 @@ settings["autoTuneSig"] = sig; settings["autoTune"] = "1";
                 var val = (kv.Value as JsonValue)?.ToString() ?? "";
                 if (val.Length == 0) env.Remove(kv.Key); else env[kv.Key] = val;
             }
+        // (Victory) 稳定模式（默认）：等价 v5 的「启动.bat」，只保留路径/工具/后端变量，不套用任何实验调参
+        if (B("stableMode", true))
+        {
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "VICTORY_GAME_DIR", "VICTORY_DATA_DIR", "VICTORY_CACHE_DIR", "VICTORY_LOG", "VICTORY_KEYBOARD",
+                "VICTORY_LOAD_DLLS", "VICTORY_REPLACE_STREAMS", "VICTORY_GPU", "VICTORY_FSR_DIR",
+                "VICTORY_STREAMLINE_DIR", "VICTORY_DLSSG_SM86_DIR", "VICTORY_FRAMEGEN_BACKEND",
+                "VICTORY_FRAMEGEN", "VICTORY_FRAMEGEN_X", "VICTORY_DLSS", "VICTORY_DLSS_MODE", "VICTORY_DLSS_PRESET",
+            };
+            var drop = new List<string>();
+            foreach (var kv in env) if (kv.Key.StartsWith("VICTORY_", StringComparison.Ordinal) && !keep.Contains(kv.Key)) drop.Add(kv.Key);
+            foreach (var k in drop) env.Remove(k);
+            notes?.Add("稳定模式：不套用实验调参（等价 v5 启动.bat）");
+        }
         if (!B("thin", true)) env.Remove("VICTORY_THIN");
         // (Victory) 显存感知的纹理预算：12G 以上不再用 92%，给 Streamline/DLSS 留显存（out of VRAM 会让 DLSS 保留旧帧 -> 闪烁）
         try
