@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; font-src 'self' file:; base-uri 'none'; form-action 'none'">
 <title>GTA6 CN · Victory</title>
-<link rel="stylesheet" href="home.css?v=19">
+<link rel="stylesheet" href="home.css?v=20">
 </head>
 <body class="booting">
 <svg class="sky" aria-hidden="true" preserveAspectRatio="xMidYMid slice" viewBox="0 0 1280 800">
@@ -102,8 +102,10 @@
           <div class="rowhead"><div><h2 class="big">存档</h2><div class="sub">载入前会自动备份将被替换的存档。载入前请先关闭游戏。</div></div>
             <div class="acts"><button class="ghostbtn sm" id="importBtn">导入存档…</button><button class="ghostbtn sm" id="openFolder">打开文件夹</button></div></div>
           <div class="card">
-            <div class="rowhead"><b>你的游戏</b><button class="link" id="chooseSaveFolder" hidden>选择存档目录…</button></div>
-            <p class="sub save-path" id="savePath" hidden></p>
+            <div class="rowhead"><b>你的游戏</b>
+              <div class="acts"><button class="link" id="findSaves" data-find="saves">自动查找本地存档</button><button class="link" id="chooseSaveFolder" hidden>选择存档目录…</button></div>
+            </div>
+            <p class="sub save-path" id="savePath"></p>
             <div id="svNow"></div>
             <form class="sv-add" id="svForm">
               <input id="svName" placeholder="给这个存档点起名，例如：船" maxlength="60" autocomplete="off" spellcheck="false">
@@ -233,7 +235,7 @@
   </div>
 </div>
 
-<script src="home.js?v=19"></script>
+<script src="home.js?v=20"></script>
 <script src="frame.js?v=3"></script>
 </body>
 </html>

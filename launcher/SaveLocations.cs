@@ -8,7 +8,8 @@ sealed class SaveLocations
     static readonly Regex SteamLibraryPath = new(@"^\s*""path""\s*""([^""]+)""", RegexOptions.Multiline);
     readonly bool test;
     readonly string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-    readonly string? windowsData;
+    readonly string localData;
+    readonly Func<string?>? dataRoot;
     readonly string selectionFile;
     string? selected;
     string[] detected = [];
@@ -16,24 +17,47 @@ sealed class SaveLocations
 
     public string ProfileDirectory { get; }
 
-    public SaveLocations(bool test, string? overridePath)
+    // dataRoot: the launcher's dataDir setting (launch.findSaves writes it), read on every use so a
+    // directory found while the launcher runs takes effect without a restart. Empty = the default below.
+    public SaveLocations(bool test, string? overridePath, Func<string?>? dataRoot = null)
     {
         this.test = test;
-        string localData = OperatingSystem.IsWindows()
+        this.dataRoot = dataRoot;
+        localData = OperatingSystem.IsWindows()
             ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
             : GetLinuxDataHome();
         ProfileDirectory = Path.Combine(localData, test ? "VISaveManager-test" : "VictorySaveManager");
         selectionFile = Path.Combine(ProfileDirectory, "game-save-directory.txt");
 
-        if (test) windowsData = Path.Combine(ProfileDirectory, "victory-data");
-        else if (OperatingSystem.IsWindows()) windowsData = Path.Combine(localData, "victory", "data");
-        else if (overridePath != null) selected = ValidateSelection(overridePath);
+        if (OperatingSystem.IsWindows() || test) return;
+        if (overridePath != null) selected = ValidateSelection(overridePath);
         else if (File.Exists(selectionFile))
         {
             string saved = File.ReadAllText(selectionFile).Trim();
             if (Path.IsPathFullyQualified(saved)) selected = saved;
         }
     }
+
+    // (Victory) the data root (the folder holding TitleId): the dataDir setting when set, else the test
+    // profile's sandbox, else %LOCALAPPDATA%\victory\data on Windows (the old hardcoded place). On Linux
+    // without a dataDir it stays null and the native / Wine-Proton detection below runs as before.
+    string? WindowsData => OverrideRoot ?? (test ? Path.Combine(ProfileDirectory, "victory-data")
+        : OperatingSystem.IsWindows() ? Path.Combine(localData, "victory", "data") : null);
+
+    // the auto-found data root (launch.findSaves): only a fully qualified path is taken
+    string? OverrideRoot
+    {
+        get
+        {
+            var root = dataRoot?.Invoke();
+            if (string.IsNullOrWhiteSpace(root)) return null;
+            try { return Path.IsPathFullyQualified(root) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)) : null; }
+            catch { return null; }
+        }
+    }
+
+    // the root the save manager reads and writes, for the page's "current save folder" line
+    public string? DataRoot => WindowsData;
 
     string GetLinuxDataHome()
     {
@@ -43,7 +67,7 @@ sealed class SaveLocations
 
     public string? GetSaveDirectory()
     {
-        if (windowsData != null)
+        if (WindowsData is string windowsData)
         {
             string preferred = Path.Combine(windowsData, TitleId, "saves");
             if (Directory.Exists(preferred)) return preferred;
@@ -61,7 +85,7 @@ sealed class SaveLocations
     public string RequireWritableLocation()
     {
         var directory = GetSaveDirectory();
-        if (windowsData != null) return directory ?? Path.Combine(windowsData, TitleId, "saves");
+        if (WindowsData is string windowsData) return directory ?? Path.Combine(windowsData, TitleId, "saves");
         if (directory == null) throw new InvalidOperationException("载入存档前请先选择 Victory 存档文件夹。");
         return ValidateSelection(directory);
     }

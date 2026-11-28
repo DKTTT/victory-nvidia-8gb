@@ -97,13 +97,16 @@ interface IDesktopHost
     void Window(string cmd);           // min, max, close from the page's own buttons
 }
 
-sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
+sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory, Func<string?>? dataDir = null)
 {
     const string TitleId = SaveLocations.TitleId;
-    readonly SaveLocations locations = new(test, saveDirectory);
+    readonly SaveLocations locations = new(test, saveDirectory, dataDir);
     public string ProfileDirectory => locations.ProfileDirectory;
     string SnapsRoot => Path.Combine(ProfileDirectory, "saves");
     static string TeamRoot => Path.Combine(AppContext.BaseDirectory, "team-saves");
+
+    // (Victory) launcher-side refresh: launch.findSaves changed the save root, so the page re-reads the list
+    public void Refresh(string? note = null, bool ok = true) => SendSaves(note, ok);
 
     // messages to the page: types known at build time, so Native AOT needs no reflection
     void Send(SavesMessage value) => host.Post(JsonSerializer.Serialize(value, VismJson.Default.SavesMessage));
@@ -219,7 +222,7 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
         var team = (Directory.Exists(TeamRoot) ? Directory.GetDirectories(TeamRoot) : Array.Empty<string>()).OrderBy(d => d).Select(Item).ToList();
         Send(new SavesMessage(
             "saves", note, ok, test, OperatingSystem.IsLinux() && !test,
-            OperatingSystem.IsLinux() ? dir : null,
+            dir, locations.DataRoot,
             dir != null && DirSize(dir) > 0,
             dir != null ? DirSize(dir) : 0,
             dir != null ? DirNewest(dir).ToString("yyyy-MM-dd HH:mm") : "",
@@ -446,7 +449,7 @@ sealed class SaveManager(IDesktopHost host, bool test, string? saveDirectory)
 
 // ---- the JSON this app writes, generated at build time (Native AOT has no reflection) ----
 record SaveItem(string Name, long Size, string GameTime, string Kept, string Note, bool Auto);
-record SavesMessage(string Type, string? Note, bool Ok, bool Test, bool CanChooseSaveFolder, string? SaveDirectory,
+record SavesMessage(string Type, string? Note, bool Ok, bool Test, bool CanChooseSaveFolder, string? SaveDirectory, string? DataDir,
     bool Found, long Size, string Newest, bool Running, List<SaveItem> Spots, List<SaveItem> Team);
 // save-info.json inside a shared zip
 record SaveInfo(string Name, string Note, string Game, string SavedAt, string MadeWith);

@@ -27,8 +27,9 @@ sealed class App
                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share"));
         ProfileDirectory = Path.Combine(local, "VictoryLauncher" + (test ? "-test" : ""));
         Directory.CreateDirectory(ProfileDirectory);
-        saves = new SaveManager(host, test, saveDirectory);
+        // Launch first: the save manager reads the launcher's dataDir setting (launch.findSaves) at use
         launch = new Launch(this, ProfileDirectory);
+        saves = new SaveManager(host, test, saveDirectory, () => launch.DataDir);
     }
 
     public void Post(JsonObject message) => host.Post(message.ToJsonString());
@@ -50,8 +51,12 @@ sealed class App
                     Post(new JsonObject { ["type"] = "app", ["title"] = Title, ["test"] = test, ["os"] = OperatingSystem.IsWindows() ? "windows" : "linux", ["frame"] = host.CustomFrame,
                         ["release"] = launch.ReleaseInfo() });
                     launch.SendSettings();
-                    // (Victory) 启动时自动找一次游戏目录：只填空，不覆盖玩家已选的
-                    _ = System.Threading.Tasks.Task.Run(() => launch.FindGame(quiet: true));
+                    // (Victory) 启动时自动找一次游戏目录与本地存档：只填空，不覆盖玩家已选的
+                    _ = System.Threading.Tasks.Task.Run(() =>
+                    {
+                        launch.FindGame(quiet: true);
+                        launch.FindSaves(quiet: true);
+                    });
                     return;
             }
             if (cmd.StartsWith("win.")) { host.Window(cmd[4..]); return; }
@@ -62,4 +67,7 @@ sealed class App
     }
 
     public Launch Launcher => launch;
+
+    // (Victory) launch.findSaves changed the save root: let the saves page re-read it
+    public void RefreshSaves(string? note = null, bool ok = true) => saves.Refresh(note, ok);
 }

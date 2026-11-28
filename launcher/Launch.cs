@@ -66,6 +66,8 @@ sealed class Launch
     void Save() { File.WriteAllText(settingsFile, settings.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); }
     public string Setting(string key) => S(key);
     public void Set(string key, string value) { settings[key] = value; Save(); }
+    // (Victory) the save data root chosen by launch.findSaves (empty: the %LOCALAPPDATA% default)
+    public string DataDir => S("dataDir");
 
     public void SendSettings()
     {
@@ -184,6 +186,8 @@ sealed class Launch
             case "warmStart": StartWarmTier((string?)m["id"] ?? "public", (string?)m["tier"] ?? "balanced"); break;
             // (Victory) 自动查找游戏目录（欢迎向导与设置里都有按钮）
             case "findGame": _ = Task.Run(() => FindGame()); break;
+            // (Victory) 自动查找本地存档（存档页与 设置 › 存档 都有按钮）
+            case "findSaves": _ = Task.Run(() => FindSaves()); break;
             case "stop": stopping = true; try { game?.Kill(true); } catch { } break;
             case "cancelJob": try { job?.Kill(true); } catch { } break;
             case "openLogs": Directory.CreateDirectory(logDir); Open(logDir); break;
@@ -389,7 +393,10 @@ sealed class Launch
         var home = File.Exists(Path.Combine(Bundled, "victory.exe")) ? Bundled : (PayloadDir ?? Bundled);
         if (!env.ContainsKey("VICTORY_CACHE_DIR"))
             env["VICTORY_CACHE_DIR"] = WinPath(pinned ?? Path.Combine(home, "cache"));
-        env["VICTORY_DATA_DIR"] = WinPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "data"));
+        // (Victory) the save data root: the auto-found/selected dataDir, else %LOCALAPPDATA%\victory\data
+        env["VICTORY_DATA_DIR"] = WinPath(S("dataDir") is { Length: > 0 } dataDir
+            ? dataDir
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "data"));
         env["VICTORY_GAME_DIR"] = WinPath(Path.GetDirectoryName(Path.GetFullPath(S("game")))!);
         // the release's own upscaler / frame-generation folders, beside victory.exe (the package folder or
         // the extracted payload), then optional drop-in folders beside a single-exe launcher as an override
@@ -838,6 +845,126 @@ sealed class Launch
         app.Out($"\n已自动找到游戏：{exe}\n", "ok");
         app.Post(new JsonObject { ["type"] = "findGame", ["ok"] = true, ["path"] = exe });
         SendSettings();
+    }
+
+    // ---- (Victory) 自动查找本地存档：dataDir = 包含 7952987A 的文件夹 ----
+    // 候选顺序：设置里的 dataDir → %LOCALAPPDATA%\victory\data → 旧版（VIctory / VIctory-Trainer /
+    // Neptune / ProjectNeptune）的 data → 启动器/解包目录的 data、perf-data → 游戏目录的 data、perf-data →
+    // VICTORY_DATA_DIR → %LOCALAPPDATA% 下名字含 victory/neptune 的文件夹里的 data。
+    // 有效 = 该根目录下有 7952987A；找到多个时取 7952987A\saves 里最新文件写入时间最新的一个。
+    // 只选路径：不移动、不改写任何存档文件。quiet = 启动时的静默扫描：只补空，不覆盖本来就能用的默认目录。
+    public void FindSaves(bool quiet = false)
+    {
+        var found = ScanSaveRoots();
+        var results = new JsonArray();
+        foreach (var f in found) results.Add(new JsonObject { ["path"] = f.root, ["from"] = f.from });
+        if (found.Count == 0)
+        {
+            if (quiet) return;
+            const string note = "没有找到本地存档：这些位置都没有 7952987A 文件夹。先玩一次游戏生成存档，再试一次。";
+            app.Out("\n" + note + "\n", "bad");
+            app.Post(new JsonObject { ["type"] = "findSaves", ["ok"] = false, ["path"] = null, ["found"] = results });
+            try { app.RefreshSaves(note, false); } catch { }
+            return;
+        }
+        var best = found[0];
+        // 默认目录本来就能用：启动时的静默扫描不写 dataDir，保持原来的默认行为
+        if (quiet && SamePath(best.root, DefaultSaveRoot())) return;
+        Set("dataDir", best.root);
+        var where = best.newest == DateTime.MinValue ? "还没有存档文件" : "最近写入 " + best.newest.ToString("yyyy-MM-dd HH:mm");
+        if (!quiet)
+        {
+            var others = found.Count > 1 ? $"\n共找到 {found.Count} 处：" + string.Join("", found.Select(f =>
+                $"\n  · {f.root}（{f.from}；{(f.newest == DateTime.MinValue ? "还没有存档文件" : "最近写入 " + f.newest.ToString("yyyy-MM-dd HH:mm"))}）")) : "";
+            app.Out($"\n已自动找到本地存档：{best.root}\n（{best.from}；{where}）{others}\n", "ok");
+            app.Post(new JsonObject { ["type"] = "findSaves", ["ok"] = true, ["path"] = best.root, ["from"] = best.from, ["found"] = results });
+            try { app.RefreshSaves($"已自动找到本地存档（共 {found.Count} 处，已选最新写入的一处）：{best.root}"); } catch { }
+        }
+        SendSettings();
+    }
+
+    static string DefaultSaveRoot() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "data");
+
+    static bool SamePath(string a, string b) => string.Equals(
+        Path.TrimEndingDirectorySeparator(a), Path.TrimEndingDirectorySeparator(b), StringComparison.OrdinalIgnoreCase);
+
+    // every candidate data root that actually holds 7952987A, best first (newest file in 7952987A\saves)
+    List<(string root, string from, DateTime newest)> ScanSaveRoots()
+    {
+        var list = new List<(string root, string from)>();
+        void Add(string? root, string from)
+        {
+            if (string.IsNullOrWhiteSpace(root)) return;
+            try
+            {
+                var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root.Trim().Trim('"')));
+                if (full.Length > 0) list.Add((full, from));
+            }
+            catch { }
+        }
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        // 1. the setting already chosen (by an earlier scan or hand-edited)
+        Add(S("dataDir"), "设置中已选的存档目录");
+        // 2. the default the launcher has always used
+        Add(Path.Combine(local, "victory", "data"), "默认存档目录");
+        // 3. old builds' names
+        foreach (var legacy in new[] { "VIctory", "VIctory-Trainer", "Neptune", "ProjectNeptune" })
+            Add(Path.Combine(local, legacy, "data"), $"旧版存档目录（{legacy}）");
+        // 4. beside the launcher / in its extracted payload
+        foreach (var dir in new[] { Bundled, PayloadDir }.Where(d => !string.IsNullOrEmpty(d)).Distinct(StringComparer.OrdinalIgnoreCase))
+            foreach (var name in new[] { "data", "perf-data" })
+                Add(Path.Combine(dir!, name), "启动器所在目录");
+        // 5. beside the game itself
+        try
+        {
+            if (S("game") is { Length: > 0 } game && Path.GetDirectoryName(Path.GetFullPath(game)) is { Length: > 0 } gameDir)
+                foreach (var name in new[] { "data", "perf-data" })
+                    Add(Path.Combine(gameDir, name), "游戏所在目录");
+        }
+        catch { }
+        // 6. the runner's own environment
+        Add(Environment.GetEnvironmentVariable("VICTORY_DATA_DIR"), "VICTORY_DATA_DIR 环境变量");
+        // 7. any %LOCALAPPDATA% folder whose name mentions victory or neptune
+        try
+        {
+            foreach (var dir in Directory.GetDirectories(local))
+            {
+                var name = Path.GetFileName(dir);
+                if (name.Contains("victory", StringComparison.OrdinalIgnoreCase) || name.Contains("neptune", StringComparison.OrdinalIgnoreCase))
+                    Add(Path.Combine(dir, "data"), $"LOCALAPPDATA 下的 {name}");
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        var found = new List<(string root, string from, DateTime newest)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (root, from) in list)
+        {
+            try
+            {
+                if (!seen.Add(root)) continue;
+                if (!Directory.Exists(Path.Combine(root, SaveLocations.TitleId))) continue;
+                found.Add((root, from, NewestSave(root)));
+            }
+            catch { }
+        }
+        // newest saves first; equal times keep the candidate order above (default before legacy)
+        return found.OrderByDescending(f => f.newest).ToList();
+    }
+
+    // the newest write time of any file in 7952987A\saves (MinValue when there is none)
+    static DateTime NewestSave(string root)
+    {
+        var newest = DateTime.MinValue;
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(Path.Combine(root, SaveLocations.TitleId, "saves"), "*", SearchOption.AllDirectories))
+                try { var t = File.GetLastWriteTime(file); if (t > newest) newest = t; } catch { }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return newest;
     }
 
     // ---- Windows runs victory.exe itself; Linux runs it through Wine/Proton (Settings › Runner) ----

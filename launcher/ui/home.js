@@ -193,8 +193,11 @@ function renderRelease() {
 function renderSaves(m) {
   SV = m;
   $('#chooseSaveFolder').hidden = !m.canChooseSaveFolder;
-  $('#savePath').hidden = !m.canChooseSaveFolder;
-  $('#savePath').textContent = m.saveDirectory || '选择游戏的存档文件夹以载入存档。';
+  // (Victory) the save root (dataDir, the folder holding 7952987A) and the saves folder the game uses
+  const rootLine = m.dataDir ? `<b>存档根目录：</b><code>${esc(m.dataDir)}</code>` : '';
+  const dirLine = m.saveDirectory ? `<b>游戏存档：</b><code>${esc(m.saveDirectory)}</code>` : '';
+  $('#savePath').innerHTML = rootLine || dirLine ? [rootLine, dirLine].filter(Boolean).join('<br>')
+    : '还没有找到存档位置：点上面的「自动查找本地存档」，或先玩一次游戏生成存档。';
   $('#svNow').innerHTML = m.found
     ? `<div class="sv-row"><div><b>当前游戏存档</b><span>最后写入 ${esc(m.newest)} · ${fmtSize(m.size)}</span></div>
         ${m.running ? '<span class="warn">游戏正在运行：关闭后才能载入</span>' : ''}
@@ -456,6 +459,9 @@ const SECTIONS = {
   ]],
   saves: () => ['存档', '所有版本共用同一个存档目录。', [
     row('存档管理', '保留存档点、载入、分享和导入存档', '<button class="mini" data-act="saves">打开</button>'),
+    // (Victory) the data root (dataDir) the launcher and the game use; auto-found when it lives elsewhere
+    row('存档目录', '游戏存档所在的数据目录（其中包含 <code>7952987A</code>）。换过电脑、装过旧版或游戏存档在别处时，可以让启动器自动查找。',
+      '<div class="acts"><button class="mini" data-find="saves">自动查找本地存档</button></div>', pathCode('dataDir')),
     row('打开存档文件夹', '你保留的存档点所在位置', '<button class="mini" data-act="saveFolder">打开</button>'),
   ]],
   logs: () => ['日志与问题报告', '每次运行都会写入日志。提交问题报告时请一并发送。', [
@@ -585,8 +591,14 @@ document.addEventListener('click', (e) => {
   const dfg = t.closest('[data-dfg]'); if (dfg) return dlssChoose(dfg.dataset.dfg);
 
   const pk = t.closest('[data-pick]'); if (pk) return send({ cmd: 'launch.pickGame' });
-  // (Victory) 自动查找游戏目录：成功时设置消息会把路径填好
-  const fd = t.closest('[data-find]'); if (fd) return send({ cmd: 'launch.findGame' });
+  // (Victory) 自动查找游戏目录 / 本地存档：成功时设置消息会把路径填好，并刷新存档页
+  const fd = t.closest('[data-find]');
+  if (fd) {
+    if (fd.dataset.find !== 'saves') return send({ cmd: 'launch.findGame' });
+    const note = $('#svNote');
+    if (note) { note.textContent = '正在自动查找本地存档…'; note.classList.remove('bad'); }
+    return send({ cmd: 'launch.findSaves' });
+  }
   const pd = t.closest('[data-pickdir]'); if (pd) return send({ cmd: 'launch.pickFolder', key: pd.dataset.pickdir, title: pd.dataset.title || (pd.dataset.pickdir === 'neptuneDir' ? 'GTA6 CN · Victory 文件夹' : 'OptiScaler 文件夹') });
   const fgb = t.closest('[data-fg]'); if (fgb) { set({ framegen: +fgb.dataset.fg }); SL = null; return renderSettings(); }
   const pf = t.closest('[data-pickfile]'); if (pf) return send({ cmd: 'launch.pickFile', key: pf.dataset.pickfile });
