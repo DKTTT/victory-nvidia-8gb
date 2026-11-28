@@ -119,8 +119,20 @@ unsafe impl Send for Memory {}
 static SPARE: Mutex<Vec<Memory>> = Mutex::new(Vec::new());
 
 /// At most this much is kept (of the card's memory, with [`on_card`]).
+/// `VICTORY_SEND_SPARE_MB` sets it (in MiB); 256 MiB on the card, 768 MiB in
+/// the PC's memory otherwise. Ported from VIctory LITE (`send.rs`).
 fn kept() -> u64 {
-    if on_card() { 256 << 20 } else { 768 << 20 }
+    static BYTES: OnceLock<u64> = OnceLock::new();
+    *BYTES.get_or_init(|| {
+        if let Some(mb) = std::env::var("VICTORY_SEND_SPARE_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            tracing::warn!(mb, "spare send memory override (VICTORY_SEND_SPARE_MB)");
+            return mb << 20;
+        }
+        if on_card() { 256 << 20 } else { 768 << 20 }
+    })
 }
 
 /// Whether the memory lies in the card's memory, written by the CPU through

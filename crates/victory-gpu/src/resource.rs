@@ -254,6 +254,22 @@ pub(crate) fn pc_format(format: u32) -> u32 {
     }
 }
 
+/// Whether `format` is a BC1-BC7 block-compressed texture (world/material/ped
+/// textures; excludes uncompressed UI/HUD/loading/font/LUT surfaces). Ported
+/// from VIctory LITE (`resource.rs`).
+#[cfg(windows)]
+pub(crate) fn is_bc_format(format: u32) -> bool {
+    matches!(pc_format(format), 70..=84 | 94..=99)
+}
+
+/// Whether `format` is a BC4 or BC5 auxiliary material map (normal, roughness,
+/// AO, mask; never primary RGB albedo/UI). Ported from VIctory LITE
+/// (`resource.rs`).
+#[cfg(windows)]
+pub(crate) fn is_bc_aux_format(format: u32) -> bool {
+    matches!(pc_format(format), 79..=84)
+}
+
 /// The format of a texture the host GPU renders to or writes as unordered
 /// access, for the title's `format`. The console's GPU does both with the
 /// 16-bit colour formats B5G5R5A1 (86) and B4G4R4A4 (115), and
@@ -1472,6 +1488,96 @@ static REPLACED: std::sync::Mutex<Vec<(u64, Made)>> = std::sync::Mutex::new(Vec:
 #[cfg(windows)]
 pub(crate) static HELD: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// Cached VRAM usage percent (refreshed every ~250 ms) for dynamic pressure
+/// mip-cap step-down during heavy scene transitions. Ported from VIctory LITE
+/// (`resource.rs`).
+#[cfg(windows)]
+fn cached_vram_percent() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static LAST_TENTH: AtomicU64 = AtomicU64::new(0);
+    static LAST_PCT: AtomicU64 = AtomicU64::new(0);
+    let slot = crate::host::coarse_ms() / 250 + 1;
+    if LAST_TENTH.load(Relaxed) == slot {
+        return LAST_PCT.load(Relaxed);
+    }
+    LAST_TENTH.store(slot, Relaxed);
+    let pct = crate::host::host()
+        .and_then(|h| h.video_memory())
+        .map_or(0, |[budget, used, ..]| {
+            if budget == 0 {
+                0
+            } else {
+                (u128::from(used) * 100 / u128::from(budget)) as u64
+            }
+        });
+    LAST_PCT.store(pct, Relaxed);
+    pct
+}
+
+/// Whether `VICTORY_TEXTURE_PRESSURE_CAP=1` dynamically halves the world BC
+/// texture cap when VRAM usage reaches >= 90 % (prevents scene-transition
+/// stalls while keeping menus/loading screens untouched). Ported from VIctory
+/// LITE (`resource.rs`).
+#[cfg(windows)]
+fn pressure_cap_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_PRESSURE_CAP").is_some_and(|v| v != "0"))
+}
+
+/// Whether the 3D world's render targets are allocated (>= 280 MiB). Before
+/// the 3D world starts (title screen, menus, initial loading screens) this is
+/// `false`, so no textures (including 2048x1024 / 2048x2048 BC7 loading screen
+/// artwork) ever get mip-capped. Ported from VIctory LITE (`resource.rs`).
+#[cfg(windows)]
+fn world_targets_active() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let targets = HOST_TEXTURES[1].load(Relaxed).saturating_sub(KINDS[1].load(Relaxed));
+    targets >= (280 << 20)
+}
+
+/// Minimum mip level forced by `VICTORY_TEXTURE_MAX_DIM` /
+/// `VICTORY_TEXTURE_MAX_DIM_AUX` / `VICTORY_TEXTURE_DROP_MIPS` for
+/// BC-compressed streamed 3D world textures only. Strictly skips:
+/// - everything before 3D world render targets exist (menus & loading screens),
+/// - non-BC formats (HUD, fonts, uncompressed UI/menus/loading screens),
+/// - non-power-of-two dimensions (e.g. 1920x1080 / 1280x720 / 3840x2160
+///   loading screens, menu artwork, 16:9 UI banners),
+/// - short mip chains (< 4 mips, typical of UI/menu/splash cards; real streamed
+///   3D world materials have full mip chains).
+/// Ported from VIctory LITE (`resource.rs`).
+#[cfg(windows)]
+fn capped_world_mip(desc: &ResourceDesc) -> u32 {
+    if !world_targets_active()
+        || !is_bc_format(desc.format)
+        || desc.mip_levels < 4
+        || !desc.width.is_power_of_two()
+        || !desc.height.is_power_of_two()
+    {
+        return 0;
+    }
+    let mut first = crate::texture::drop_mips();
+    let mut cap = match (
+        crate::texture::max_dim(),
+        if is_bc_aux_format(desc.format) { crate::texture::max_dim_aux() } else { None },
+    ) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    if pressure_cap_on() && cached_vram_percent() >= 90 {
+        cap = cap.map(|c| (c / 2).max(128));
+    }
+    if let Some(cap) = cap {
+        let cap_mip = crate::texture::capped_first_mip(
+            desc.width.min(u64::from(u32::MAX)) as u32,
+            desc.height,
+            usize::from(desc.mip_levels),
+            cap,
+        ) as u32;
+        first = first.max(cap_mip);
+    }
+    first.min(u32::from(desc.mip_levels - 1))
+}
+
 /// A view of the placed texture `this` that starts at level `first` is made
 /// or brought up to date: a host copy without that level is replaced by one
 /// with it (made and filled at the next use; the slots that show the old
@@ -1486,6 +1592,9 @@ pub(crate) fn want_level(this: This, first: u32) {
     if r.desc.dimension == BUFFER || !r.host.placed.load(Relaxed) {
         return;
     }
+    // A view below the level `VICTORY_TEXTURE_MAX_DIM` / `_AUX` /
+    // `VICTORY_TEXTURE_DROP_MIPS` keep shows the copy there.
+    let first = first.max(capped_world_mip(&r.desc));
     let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
     let Some((host, _)) = made.as_ref() else {
         r.host.wanted.fetch_min(first, Relaxed);
@@ -1814,15 +1923,18 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             }
         }
         // The levels views show ([`held_only`]), those of the slots shaders
-        // pick by index among them.
+        // pick by index among them; below `VICTORY_TEXTURE_MAX_DIM` / `_AUX` /
+        // `VICTORY_TEXTURE_DROP_MIPS` nothing is kept ([`capped_world_mip`]).
         let mut base = dropped;
         if shape_fits && r.host.placed.load(Relaxed) && held_only() && !is_aliased(this) {
             let wanted = r.host.wanted.load(Relaxed);
             let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
-            let first = wanted.min(viewed);
-            if first != u32::MAX {
-                base = base.max(base_level(&r.desc, first));
-            }
+            let capped = capped_world_mip(&r.desc);
+            let first = match wanted.min(viewed) {
+                u32::MAX => capped,
+                f => f.max(capped),
+            };
+            base = base.max(base_level(&r.desc, first));
         }
         let texture = match texture {
             Some(texture) => Some(texture),

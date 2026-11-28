@@ -1099,6 +1099,69 @@ impl PreludeUpload {
     }
 }
 
+/// Optional maximum dimension (`VICTORY_TEXTURE_MAX_DIM`, e.g. `512` or
+/// `1024`; off when unset or `0`) of BC-compressed placed world textures.
+/// Ported from VIctory LITE (`texture.rs`).
+pub(crate) fn max_dim() -> Option<u32> {
+    static CAP: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        let cap = std::env::var("VICTORY_TEXTURE_MAX_DIM")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .map(|v| v.max(64));
+        if let Some(max_dim) = cap {
+            tracing::warn!(max_dim, "BC world texture mip cap active (VICTORY_TEXTURE_MAX_DIM)");
+        }
+        cap
+    })
+}
+
+/// Optional tighter maximum dimension (`VICTORY_TEXTURE_MAX_DIM_AUX`, e.g.
+/// `256`) for BC4/BC5 auxiliary material maps (normal, roughness, AO, masks)
+/// while BC1/BC3/BC7 colour/albedo textures stay at `VICTORY_TEXTURE_MAX_DIM`.
+/// Ported from VIctory LITE (`texture.rs`).
+pub(crate) fn max_dim_aux() -> Option<u32> {
+    static CAP: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        let cap = std::env::var("VICTORY_TEXTURE_MAX_DIM_AUX")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .map(|v| v.max(64));
+        if let Some(max_dim_aux) = cap {
+            tracing::warn!(max_dim_aux, "BC4/BC5 normal/mask mip cap active (VICTORY_TEXTURE_MAX_DIM_AUX)");
+        }
+        cap
+    })
+}
+
+/// Optional extra top mips dropped (`VICTORY_TEXTURE_DROP_MIPS`, 0..=4; 0 off)
+/// of BC-compressed placed world textures. Ported from VIctory LITE
+/// (`texture.rs`).
+pub(crate) fn drop_mips() -> u32 {
+    static DROP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *DROP.get_or_init(|| {
+        let drop = std::env::var("VICTORY_TEXTURE_DROP_MIPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            .min(4);
+        if drop > 0 {
+            tracing::warn!(drop, "BC world texture mip drop active (VICTORY_TEXTURE_DROP_MIPS)");
+        }
+        drop
+    })
+}
+
+/// Lowest mip index whose largest dimension is `<= cap`.
+pub(crate) fn capped_first_mip(width: u32, height: u32, levels: usize, cap: u32) -> usize {
+    let largest = width.max(height);
+    (0..levels.min(32))
+        .find(|&level| (largest >> level).max(1) <= cap)
+        .unwrap_or_else(|| levels.saturating_sub(1))
+}
+
 fn record_upload(
     list: &HostList,
     resource: This,

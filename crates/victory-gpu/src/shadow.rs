@@ -3020,7 +3020,25 @@ pub(crate) fn let_go_idle() {
         if map.is_empty() {
             return;
         }
-        let idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+        let mut idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+        // A shorter idle window than the RAM pressure allows (`VICTORY_WINDOW_IDLE_MS`,
+        // ms; uses the smaller of it and the usual one), and 2 s at 70 % of the
+        // shared memory: the cards of 4 GB keep the world's windows in the PC's
+        // memory otherwise. Unset: as before. Ported from VIctory LITE
+        // (`shadow.rs`), where the shared-memory part runs without the variable.
+        if let Some(over) = std::env::var("VICTORY_WINDOW_IDLE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&v| v > 0)
+        {
+            idle_ms = idle_ms.min(over);
+            if let Some([_, _, shared_budget, shared_used]) = host().and_then(|h| h.video_memory())
+                && shared_budget > 0
+                && u128::from(shared_used) * 100 >= u128::from(shared_budget) * 70
+            {
+                idle_ms = idle_ms.min(2_000);
+            }
+        }
         let idle: Vec<(u64, u64)> = map
             .iter()
             .filter(|(_, s)| {
