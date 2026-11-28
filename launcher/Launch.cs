@@ -585,6 +585,15 @@ sealed class Launch
         var dlssOn = B("dlss", false);
         var vendor = Vendor();
         var nvidia = vendor == "nvidia" || Rtx() >= 20;
+        // (Victory) never silently start without the files the player picked: say why instead of "选了却没生效"
+        if ((dlssOn || fgFrames > 0) &&
+            Streamline.Missing(SlDir(), Streamline.Needed(fgFrames > 0, dlssOn)) is string missingWhy)
+        {
+            notes.Add("DLSS/帧生成未启用：" + missingWhy +
+                      "（完整版请把 nvidia-sdk 放在启动器旁边，或设置 › 画面 › 获取 NVIDIA 文件）");
+            dlssOn = false;
+            fgFrames = 0;
+        }
         if (dlssOn && !nvidia) { dlssOn = false; notes.Add("未检测到 NVIDIA 显卡：DLSS 已关闭（AMD/Intel 用 FSR）"); }
         if (dlssOn) { args.AddRange(["--dlss", S("dlssMode", "quality")]); env["VICTORY_DLSS"] = "1"; }
         if (fgFrames > 0 && nvidia && Rtx() is >= 20 and < 40)
