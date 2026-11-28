@@ -39,21 +39,21 @@ const KEYS: usize = 2;
 /// What the panel shows.
 #[derive(Clone, Default)]
 pub(crate) struct Stats {
-    fps: f64,
-    ms: f64,
-    cpu: f64,
-    gpu: Option<f64>,
+    pub(crate) fps: f64,
+    pub(crate) ms: f64,
+    pub(crate) cpu: f64,
+    pub(crate) gpu: Option<f64>,
     /// This process's working set, system memory used and total, in GB.
-    ram: (f64, f64, f64),
+    pub(crate) ram: (f64, f64, f64),
     /// Video memory used and budget, in GB.
-    vram: Option<(f64, f64)>,
-    cpu_name: String,
-    gpu_name: String,
+    pub(crate) vram: Option<(f64, f64)>,
+    pub(crate) cpu_name: String,
+    pub(crate) gpu_name: String,
     /// Draws per frame, from the same meter.
-    draws: f64,
+    pub(crate) draws: f64,
     /// Of the last thirty seconds of that meter's frame rates: the highest, the lowest and the
     /// mean (none before there are two).
-    half_minute: Option<(f64, f64, f64)>,
+    pub(crate) half_minute: Option<(f64, f64, f64)>,
 }
 
 /// Draws per frame, times 100, and the meter's last thirty frame rates (one a second).

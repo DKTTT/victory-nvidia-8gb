@@ -344,14 +344,32 @@ sealed class Launch
         // (Victory) the in-game F1 menu file overrides `play`; a stale choice (e.g. 3X frame generation without
         // DLSS) makes the title fail at its first upscaling and exit with code 0, which looks like nothing happened.
         // The launcher owns the settings: back the old file up and run without it.
+        // (Victory) the in-game F1 menu saves to victory-settings.txt and overrides `play` on the next start. A
+        // stale 3X-frame-generation / DLSS choice makes the title fail at its first upscaling, so drop only those
+        // keys (keeping everything else the player saved) instead of deleting the whole file.
         try
         {
             var f1 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "victory-settings.txt");
             if (File.Exists(f1))
             {
-                File.Copy(f1, f1 + ".bak", true);
-                File.Delete(f1);
-                app.Out("\n旧的 F1 菜单设置已备份为 victory-settings.txt.bak 并忽略（由启动器管理设置）\n", "h");
+                var risky = new[] { "VICTORY_FRAMEGEN", "VICTORY_FRAMEGEN_X", "VICTORY_FRAMEGEN_BACKEND", "VICTORY_DLSS", "VICTORY_DLSS_PRESET", "VICTORY_MENU_FRAMEGEN", "VICTORY_MENU_FG_TYPE", "VICTORY_MENU_DLSS" };
+                var kept = new List<string>();
+                var dropped = 0;
+                foreach (var raw in File.ReadAllLines(f1))
+                {
+                    var t = raw.Trim();
+                    if (t.Length == 0 || t.StartsWith("#")) { kept.Add(raw); continue; }
+                    var eq = t.IndexOf('=');
+                    var key = (eq >= 0 ? t.Substring(0, eq) : t).Trim().ToUpperInvariant();
+                    if (Array.IndexOf(risky, key) >= 0) { dropped++; continue; }
+                    kept.Add(raw);
+                }
+                if (dropped > 0)
+                {
+                    File.Copy(f1, f1 + ".bak", true);
+                    File.WriteAllLines(f1, kept);
+                    app.Out(string.Format("\nF1 菜单里 {0} 项旧帧生成/DLSS 设置已忽略（原文件备份为 victory-settings.txt.bak），其余设置保留\n", dropped), "h");
+                }
             }
         }
         catch { }

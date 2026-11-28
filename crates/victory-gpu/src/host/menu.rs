@@ -1,4 +1,4 @@
-//! The F1 settings menu. F1 shows and hides it while our window has the
+﻿//! The F1 settings menu. F1 shows and hides it while our window has the
 //! focus; Up/Down pick a setting, Left/Right change it, Enter runs the line
 //! picked (save, save and restart, preload shaders, reset, close), Esc
 //! closes. Preloading saves, ends this run and has the launcher make every
@@ -198,14 +198,30 @@ fn fps_line() -> Option<String> {
     if super::panel::shown().load(Ordering::Relaxed) {
         return None;
     }
-    let fps = f64::from(super::METER_FPS_TENTHS.load(Ordering::Relaxed)) / 10.0;
+    // (Victory) the same figures as the F10 panel, in its style
+    let stats = crate::overlay::snapshot()?;
+    let fps = stats.fps;
     if fps <= 0.0 {
         return None;
     }
-    Some(match crate::streamline::shown_per_frame() {
-        1 => format!("FPS: {fps:.1}"),
-        per => format!("FPS: {fps:.1}  FG: {:.1}", fps * f64::from(per)),
-    })
+    let per = crate::streamline::shown_per_frame().max(1);
+    let shown = fps * f64::from(per);
+    let mut out = if per == 1 {
+        format!("FPS {fps:.1}   {:.1} ms", stats.ms)
+    } else {
+        format!("FPS {fps:.1} x{per}   {shown:.1} shown   {:.1} ms", stats.ms)
+    };
+    if let Some((low, high, avg)) = stats.half_minute {
+        out.push_str(&format!("   30s avg {avg:.1}  high {high:.1}  low {low:.1}"));
+    }
+    out.push_str(&format!("   draws {:.0}", stats.draws));
+    if let Some(gpu) = stats.gpu {
+        out.push_str(&format!("   GPU {gpu:.0}%"));
+    }
+    if let Some((used, budget)) = stats.vram {
+        out.push_str(&format!("   VRAM {used:.1}/{budget:.1} GB"));
+    }
+    Some(out)
 }
 
 /// The index of `value` among the item's values (an unknown value: shown as
