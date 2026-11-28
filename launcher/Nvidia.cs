@@ -1,4 +1,4 @@
-// (Neptune) NVIDIA DLSS upscaling and DLSS Frame Generation run on NVIDIA's own Streamline DLLs, which are
+﻿// (Neptune) NVIDIA DLSS upscaling and DLSS Frame Generation run on NVIDIA's own Streamline DLLs, which are
 // not ours to ship. Settings › Graphics has a button that, when the player presses it (never on its own), fetches
 // NVIDIA's Streamline SDK release from NVIDIA's GitHub, checks its size and SHA-256, keeps only the few DLLs a run
 // needs (bin\x64, not the development ones) in %LOCALAPPDATA%\Neptune\streamline, and keeps each only when it has a
@@ -24,7 +24,7 @@ static class Streamline
     // DLSS upscaling: 56.6 MB more
     static readonly string[] Upscale = ["sl.dlss.dll", "nvngx_dlss.dll"];
 
-    public static string DefaultDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Neptune", "streamline");
+    public static string DefaultDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "streamline");
 
     public static string[] Needed(bool framegen, bool dlss) => [.. Base, .. framegen ? FrameGen : [], .. dlss ? Upscale : []];
 

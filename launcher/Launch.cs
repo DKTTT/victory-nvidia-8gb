@@ -312,7 +312,13 @@ sealed class Launch
         var args = new List<string> { "play", WinPath(Path.GetFullPath(gamePath)) };
         args.AddRange(console);
         var fgFrames = FrameGen();
-        if (fgFrames > 0) args.AddRange(["--framegen", (fgFrames + 1).ToString()]);
+        var dlssOn = B("dlss", false);
+        if (dlssOn) { args.AddRange(["--dlss", S("dlssMode", "quality")]); env["VICTORY_DLSS"] = "1"; }
+        if (fgFrames > 0)
+        {
+            args.AddRange(["--framegen", (fgFrames + 1).ToString()]);
+            if (dlssOn) args.AddRange(["--fg-type", "dlss"]);
+        }
         // `play` clears the VICTORY_* it inherits: the switches go in with --set
         foreach (var kv in env) args.AddRange(["--set", kv.Key + "=" + kv.Value]);
         args.AddRange(SplitArgs(extraArgs));
@@ -370,6 +376,8 @@ sealed class Launch
         {
             var amd = Path.Combine(exeDir, "amd-sdk");
             if (Directory.Exists(amd) && !env.ContainsKey("VICTORY_FSR_DIR")) env["VICTORY_FSR_DIR"] = WinPath(amd);
+            var sm86 = Path.Combine(exeDir, "dlssg-sm86");
+            if (Directory.Exists(sm86) && !env.ContainsKey("VICTORY_DLSSG_SM86_DIR")) env["VICTORY_DLSSG_SM86_DIR"] = WinPath(sm86);
             foreach (var n in new[] { "nvidia-sdk", "dlssg-sm86", "dlssg", "streamline" })
             {
                 var d = Path.Combine(exeDir, n);
