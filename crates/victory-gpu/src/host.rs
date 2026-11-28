@@ -733,14 +733,16 @@ fn card_clock_watch(clock: &'static CardClock) {
 
 /// For the frame-rate line: [`CARD_CLOCK_US`] per frame, `ms` being the
 /// frame's time.
-fn card_clock_line(frames: f64, ms: f64) {
+fn card_clock_line(frames: f64, ms: f64) -> f64 {
     let [idle, behind, stood] = [0, 1, 2].map(|i| CARD_CLOCK_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
+    let busy = if ms > 0.0 { (100.0 * (1.0 - idle / ms)).clamp(0.0, 100.0) } else { 0.0 };
     tracing::info!(
-        "the card's clock per frame: nothing of ours queued {idle:.1} ms (the card about {:.0}% busy by this count), \
+        "the card's clock per frame: nothing of ours queued {idle:.1} ms (the card about {busy:.0}% busy by this count), \
          {behind:.1} ms of that while the submitting thread was working (the card idle behind us), the rest while the title \
-         had not submitted; the submitting thread stood waiting for the card {stood:.1} ms",
-        if ms > 0.0 { (100.0 * (1.0 - idle / ms)).clamp(0.0, 100.0) } else { 0.0 }
+         had not submitted; the submitting thread stood waiting for the card {stood:.1} ms"
     );
+    // (Neptune) For the frametime dump.
+    busy
 }
 
 /// Of the preparing: title memory copies (microseconds, bytes) and texture
@@ -1049,6 +1051,17 @@ impl Host {
         // SAFETY: a plain query.
         adapter.map_or(0, |a| unsafe { a.CheckInterfaceSupport(&IDXGIDevice::IID) }.unwrap_or(0))
     }
+}
+
+/// (Neptune) The host adapter's name and dedicated memory, for the frametime dump's
+/// header (`crate::frametime`; from our tree, commit 4f1040deb).
+pub(crate) fn adapter_summary() -> Option<(String, u64)> {
+    let host = host()?;
+    let adapter = host.adapter.as_ref()?;
+    // SAFETY: a plain DXGI adapter query on an adapter the device named.
+    let desc = unsafe { adapter.cast::<IDXGIAdapter1>().ok()?.GetDesc1().ok()? };
+    let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+    Some((String::from_utf16_lossy(&desc.Description[..end]), desc.DedicatedVideoMemory as u64))
 }
 
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
@@ -9380,6 +9393,16 @@ struct Presenter {
 /// line at the top of the picture (`menu.rs`).
 pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// (Neptune) Draws a frame over the last second the meter counted, times 100 (0 before
+/// the first line): how `victory_hle`'s input tells the start screens and loading (a
+/// handful) from the world (thousands), for `VICTORY_AUTO_A`.
+static DRAWS_A_FRAME_X100: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Draws per frame over the last second the meter counted (0 before the first line).
+pub(crate) fn draws_a_frame() -> f64 {
+    DRAWS_A_FRAME_X100.load(Ordering::Relaxed) as f64 / 100.0
+}
+
 struct Meter {
     since: std::time::Instant,
     frames: u32,
@@ -9416,6 +9439,8 @@ impl Meter {
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
         #[cfg(feature = "diagnostics")]
         crate::copystat::presented();
+        // (Neptune) `VICTORY_FRAMETIME_DUMP`: every present timed.
+        crate::frametime::tick();
         self.frames += 1;
         #[cfg(feature = "diagnostics")]
         {
@@ -9431,6 +9456,7 @@ impl Meter {
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
         METER_FPS_TENTHS.store((fps * 10.0).round() as u32, Ordering::Relaxed);
         let draws = (drawn - self.drawn) as f64 / frames;
+        DRAWS_A_FRAME_X100.store((draws * 100.0) as u64, Ordering::Relaxed);
         // (Victory) The performance overlay's panel (F10) reads the same meter.
         crate::overlay::set_frame(fps, ms, draws);
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
@@ -9461,7 +9487,7 @@ impl Meter {
         late_line(frames);
         crate::queue::behind_line(frames);
         crate::streamline::line(frames);
-        card_clock_line(frames, ms);
+        let card_busy = card_clock_line(frames, ms);
         two_queues::line(frames);
         #[cfg(feature = "diagnostics")]
         spans::line(frames);
@@ -9471,7 +9497,7 @@ impl Meter {
         crate::heap_marks::line(frames);
         #[cfg(feature = "diagnostics")]
         split_line(frames);
-        {
+        let [card_passes, card_compares] = {
             let [passes, pieces, compares] = [0, 1, 2].map(|i| CARD_PASSES[i].swap(0, Ordering::Relaxed) as f64 / frames);
             let wc_left = crate::shadow::WC_LEFT.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
             if passes + compares + wc_left > 0.0 {
@@ -9482,8 +9508,9 @@ impl Meter {
                     if rehash_runs() { "on" } else { "off" }
                 );
             }
-        }
-        {
+            [passes, compares]
+        };
+        let texture_refresh_ms = {
             let [own, asking, still, all] =
                 [0, 1, 2, 3].map(|i| crate::texture::REFRESH_WAITS[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
             if all >= 1.0 {
@@ -9512,7 +9539,8 @@ impl Meter {
                      (VICTORY_EXACT_NO_WAIT=0: all wait)"
                 );
             }
-        }
+            all
+        };
         {
             let [copies, joined] = [0, 1].map(|i| COPIES_JOINED[i].swap(0, Ordering::Relaxed) as f64 / frames);
             if copies > 0.0 {
@@ -9534,6 +9562,47 @@ impl Meter {
         let planes = crate::resource::PLANES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         // Copies in the card's memory (`crate::shadow::cards`).
         let card = crate::shadow::card_stats();
+        // (Neptune) `VICTORY_FRAMETIME_DUMP`: one row per line, with the buckets above and
+        // the worst and mean frame measured at each present (from our tree, 4f1040deb).
+        {
+            let (frame_ms_max, frame_ms_avg, _timed) = crate::frametime::take_interval();
+            crate::frametime::record(&crate::frametime::Row {
+                frame: crate::queue::presented(),
+                frames,
+                fps,
+                ms,
+                frame_ms_max,
+                frame_ms_avg,
+                cpu_prepare_ms: cpu,
+                gpu_ms: gpu,
+                gpu_pct: card_busy,
+                copies_ms: copy_ms,
+                copies_mb: copy_mb,
+                textures_ms: texture_ms,
+                textures_mb: texture_mb,
+                copyback_ms: back_ms,
+                copyback_mb: back_mb,
+                draws,
+                dropped,
+                making: crate::pipeline::making() as f64,
+                indirect,
+                heap_passes: picked,
+                heap_ms: picked_ms,
+                texture_refresh_ms,
+                card_passes,
+                card_compares,
+                card_sent_mb: card[0] as f64 / frames / 1e6,
+                card_ranges: card[1] as f64 / frames,
+                card_pieces: card[2] as f64 / frames,
+                card_fetched: card[3] as f64 / frames,
+                card_fetched_mb: card[4] as f64 / frames / 1e6,
+                card_waits: card[5] as f64 / frames,
+                card_wait_ms: card[6] as f64 / frames / 1e3,
+                twins_into_depth: twin_to_depth,
+                twins_into_colour: twin_to_colour,
+                depth_planes: planes,
+            });
+        }
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();
         // Over the same frames as the counts above.

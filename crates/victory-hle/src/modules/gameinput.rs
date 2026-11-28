@@ -67,12 +67,16 @@ const DEVICES: usize = PADS + 3;
 const HISTORY: usize = 256;
 const POLL: Duration = Duration::from_millis(8);
 
+/// (Neptune) The key that is the stand-in pad's A: Enter (this tree's table below
+/// maps it to A).
+const A_KEY: u8 = 0x0D;
+
 /// The keyboard's stand-in gamepad (virtual key, button); README lists it.
 /// Sticks: W/A/S/D left, I/J/K/L right; triggers Z and C.
 const FALLBACK_BUTTONS: [(u8, u32); 14] = [
     (0x1B, MENU), // Esc
     (0x09, VIEW), // Tab
-    (0x0D, A),    // Enter
+    (A_KEY, A),   // Enter
     (0x08, B),    // Backspace
     (b'X', X),
     (b'Y', Y),
@@ -85,6 +89,16 @@ const FALLBACK_BUTTONS: [(u8, u32); 14] = [
     (b'F', LEFT_STICK),
     (b'H', RIGHT_STICK),
 ];
+
+/// (Neptune) Draws a frame from which the world is taken to be on screen: the start screens and
+/// the loading screen draw 1 to 12, menus some tens, the lightest room seen 1,900.
+const WORLD_DRAWS: f64 = 1000.0;
+
+/// (Neptune) Whether the A presses of `VICTORY_AUTO_A` end now, before their time is up: the
+/// world is drawn (`draws` a frame over the last second), or the user pressed a key of their own.
+fn auto_a_over(draws: f64, own_key: bool) -> bool {
+    own_key || draws >= WORLD_DRAWS
+}
 
 /// A gamepad reading: triggers 0 to 1, sticks -1 to 1 (up positive).
 #[repr(C)]
@@ -1298,6 +1312,7 @@ mod host {
                 return Vec::new();
             }
             let mut down = scripted();
+            let mut own_key = false;
             if focused() {
                 // Left/right modifier keys only, as devices report them; no
                 // mouse buttons (below 0x08).
@@ -1306,7 +1321,35 @@ mod host {
                     // SAFETY: plain queries.
                     .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
                     .collect();
+                own_key = !held.is_empty();
                 down.extend(held);
+            }
+            // (Neptune) `VICTORY_AUTO_A=<seconds>`: for that long after the start, the key
+            // of the stand-in pad's A is down for a quarter of a second in every four,
+            // whether or not the window has focus: a launch gets through the title's
+            // "press A" screens without the focus being taken from what the user does.
+            // It ends for good before that time as soon as the world is drawn (A is the
+            // jump there: the character kept jumping for the rest of the 150 seconds a
+            // launcher asks for, user's report of 2026-11-27) or the user presses a key
+            // of their own in the window.
+            static AUTO_A: LazyLock<u64> = LazyLock::new(|| {
+                std::env::var("VICTORY_AUTO_A").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+            });
+            static AUTO_A_OVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let run = super::START.elapsed();
+            if *AUTO_A != 0 && !AUTO_A_OVER.load(std::sync::atomic::Ordering::Relaxed) {
+                let draws = victory_gpu::draws_a_frame();
+                if run.as_secs() >= *AUTO_A || super::auto_a_over(draws, own_key) {
+                    AUTO_A_OVER.store(true, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        seconds = run.as_secs(),
+                        draws = draws as u64,
+                        own_key,
+                        "the A presses for the start screens are over (VICTORY_AUTO_A)"
+                    );
+                } else if run.as_millis() % 4000 < 250 && !down.contains(&super::A_KEY) {
+                    down.push(super::A_KEY);
+                }
             }
             down.into_iter()
                 .map(|vk| KeyState {
@@ -1514,6 +1557,17 @@ mod tests {
     use crate::HostPolicy;
     use victory_loader::Provenance;
     use victory_pe::ImportSymbol;
+
+    /// The presses for the start screens go on through those screens and the loading screen,
+    /// and end in the world or at a key of the user's own.
+    #[test]
+    fn auto_a_ends_in_the_world_or_at_the_users_key() {
+        assert!(!auto_a_over(0.0, false), "before the first frame line");
+        assert!(!auto_a_over(12.0, false), "start screens and loading");
+        assert!(!auto_a_over(80.0, false), "a menu");
+        assert!(auto_a_over(1901.0, false), "the lightest room seen");
+        assert!(auto_a_over(4.0, true), "the user's own key");
+    }
 
     #[derive(Default)]
     struct FakeHost {

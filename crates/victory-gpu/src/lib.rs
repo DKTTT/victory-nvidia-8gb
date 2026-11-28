@@ -40,6 +40,8 @@ mod external;
 pub mod fence;
 pub mod frame;
 #[cfg(windows)]
+pub mod frametime;
+#[cfg(windows)]
 mod fsr;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
@@ -117,6 +119,14 @@ mod texback;
 
 #[cfg(windows)]
 pub use host::on_failure;
+
+/// (Neptune) Draws per frame over the last second the meter counted (0 before the first
+/// frame line): how `victory_hle`'s input tells the start screens and loading (a handful)
+/// from the world (thousands), for `VICTORY_AUTO_A`.
+#[cfg(windows)]
+pub fn draws_a_frame() -> f64 {
+    host::draws_a_frame()
+}
 
 /// Whether `switch` is on now, if it is one of those `VICTORY_AB` turns on and
 /// off while the title runs (`ab`).
