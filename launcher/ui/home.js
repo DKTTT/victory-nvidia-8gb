@@ -120,17 +120,37 @@ function renderHome() {
   // (Victory) 点它总是先打开档位选择；只有还没选好游戏文件时才不能点
   warmBtn.disabled = running || (!job && (!gameOk || !filesOk));
   warmBtn.title = !gameOk || !filesOk ? '请先在设置里选择游戏文件' : '';
-  $('#warmBar').hidden = !job;
-  const wp = warmProgress();
-  $('#warmText').textContent = wp.line;
+  // (Victory) the warm-up has its own full-width panel below the hero: percent, bar, counts, elapsed, cancel
+  const warming = !!job;
+  $('#warmWrap').hidden = !warming;
+  $('#warmBar').hidden = true;   // the old inline bar is replaced by the panel
+  if (warming) {
+    const wp = warmProgress();
+    const pct = wp.pct == null ? 0 : wp.pct;
+    const has = warm.total != null;
+    const elapsed = JOB_T ? Math.max(1, Math.round((Date.now() - JOB_T) / 60000)) : 0;
+    const left = warmLeft();
+    const fill = $('#warmBigFill');
+    $('#warmBig').textContent = has ? pct + '%' : '准备中…';
+    fill.classList.toggle('indet', !has);
+    fill.style.width = has ? pct + '%' : '100%';
+    const stage = String(job || '').replace(/^.*?预热着色器/, '').replace(/[（）()]/g, '').trim();
+    $('#warmMeta').textContent = (has
+      ? `${num(warm.count || 0)} / ${num(warm.total)} 条管线 · 已运行 ${elapsed} 分钟${left ? ' · 预计剩余 ' + left : ''}`
+      : `正在启动预热进程… · 已运行 ${elapsed} 分钟`) + (stage ? ` · ${stage}` : '');
+    $('#warmHint').textContent = (has && (warm.count || 0) === 0 && elapsed >= 3)
+      ? '首批编译最慢，属正常；如果长时间停在 0%，可取消后提取日志发作者'
+      : (elapsed >= 20 ? '预热期间请勿关闭启动器；可随时取消，已完成的会保留' : '');
+  }
   const noDll = false;   // Series S uses the title's own upscaler: nothing to add
   // the note keeps its line when empty, so the buttons above it never move
   $('#heroNote').classList.toggle('off', !noDll || running);
   const setup = !gameOk || !filesOk;
   $('#setupCorner').hidden = !setup || running || !!job;
   // 预热着色器 can't run before set-up anyway: its place goes to SET UP NEEDED, so that fits on the Play row
-  warmBtn.hidden = setup && !running && !job;
+  warmBtn.hidden = warming || (setup && !running && !job);   // the warm panel has the cancel button now
   renderDlssHome(setup && !running && !job);
+  if (warming) $('#dlssBtn').hidden = true;
   $('#hero').classList.toggle('needsetup', setup && !running && !job);
   // (Victory) 启动中面板：灰色开始键 + 已等待秒数 + 当前步骤（窗口出现前 CPU 100% 属正常）
   const sp = $('#startPanel');
@@ -636,6 +656,7 @@ document.addEventListener('click', (e) => {
   if (t.closest('#warmAnyway')) { warmDlgDone(); beginStart(); return play(); }
   if (t.closest('#warmClose')) return closeWarmDlg();
   if (t.closest('#startCancel')) { endStart(); return send({ cmd: 'launch.stop' }); }
+  if (t.closest('#warmCancel')) return send({ cmd: 'launch.cancelJob' });
   // (Victory) 档位窗：选中一个再按「继续」才开始；取消什么都不做
   if (t.closest('#tierGo')) return tierSend();
   if (t.closest('#tierCancel')) return closeTierDlg();

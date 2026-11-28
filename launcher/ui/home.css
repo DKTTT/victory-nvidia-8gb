@@ -528,3 +528,18 @@ select option { background: #15151A; color: #F8F5FF; }
 
 /* (Victory) three small buttons in one row (cache: change/open/clear) wrap instead of squeezing the path */
 .srow .acts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+
+/* (Victory) 预热面板：整行卡片，百分比/进度条/耗时/取消，不和 hero 挤在一起 */
+.warmwrap[hidden] { display: none; }
+.warmpanel { margin: 12px 0 4px; padding: 16px 18px; border: 1px solid rgba(233,99,155,.35); border-radius: 16px; background: linear-gradient(180deg, rgba(233,99,155,.10), rgba(233,99,155,.04)); }
+.warmhead { display: flex; align-items: center; gap: 14px; }
+.warmtitle { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.warmtitle b { font: 700 26px/1.1 var(--head); letter-spacing: .02em; }
+.warmbigbar { margin-top: 14px; height: 12px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; }
+.warmbigbar i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--blue, #E9639B), #F27DAE); transition: width .4s ease; }
+.warmbigbar i.fill { background: linear-gradient(90deg, var(--blue, #E9639B), #F27DAE); }
+.warmmeta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 12.5px; color: var(--soft2); }
+.warmmeta .warn { color: var(--amber); }
+
+@keyframes warmSweep { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+.warmbigbar i.indet { background: linear-gradient(90deg, rgba(233,99,155,.10), rgba(233,99,155,.75), rgba(233,99,155,.10)); background-size: 200% 100%; animation: warmSweep 1.4s linear infinite; }

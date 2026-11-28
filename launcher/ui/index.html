@@ -86,6 +86,21 @@
             </div>
           </div>
 
+          <div class="warmwrap" id="warmWrap" hidden>
+            <div class="warmpanel">
+              <div class="warmhead">
+                <div class="spin" aria-hidden="true"></div>
+                <div class="warmtitle">
+                  <div class="eyebrow">正在预热着色器</div>
+                  <b id="warmBig">准备中</b>
+                </div>
+                <button class="ghostbtn" id="warmCancel" style="height:40px">取消预热</button>
+              </div>
+              <div class="warmbigbar"><i id="warmBigFill"></i></div>
+              <div class="warmmeta"><span id="warmMeta">正在启动预热进程…</span><span id="warmHint" class="warn"></span></div>
+            </div>
+          </div>
+
           <div class="cards">
             <div class="card"><div class="k">上次游玩</div><div class="v" id="cSession">还没有</div><div class="s" id="cSessionS">点开始游戏</div></div>
             <div class="card"><div class="k">着色器缓存</div><div class="v" id="cShaders">未预热</div><div class="s" id="cShadersS">预热一次，首局更顺</div></div>
