@@ -333,6 +333,8 @@ function nvidiaRows() {
     : ready ? `<small class="ok">NVIDIA 签名文件已就绪，位于 ${esc(sl.dir)}</small>`
     : `<small class="warn">尚未就绪：就绪前开始游戏将不启用 DLSS。</small>`;
   return [
+    row('帧生成后端', 'DLSS 与 FSR 帧生成互切：自动按显卡代际选择（新 N 卡 DLSS，老 N 卡/A 卡 FSR）。',
+      `<div class="seg" role="radiogroup" aria-label="帧生成后端">${[["auto","自动"],["dlss","DLSS"],["fsr","FSR"]].map(([k,l]) => `<button data-fgb="${k}" class="${st('fgBackend','auto') === k ? 'on' : ''}">${l}</button>`).join('')}</div>`),
     row('帧生成（DLSS）', gen >= 50 ? `DLSS 在游戏两帧之间生成的帧数（${esc(PC.gpu)}：最高 6 倍）`
       : gen >= 40 ? `DLSS 在游戏两帧之间生成的帧数（${esc(PC.gpu)}：2 倍；更高需要 RTX 50）`
       : sm86 && gen >= 20 ? `RTX 30 通过包内 dlssg-sm86 支持 2 倍帧生成（实验；需要 DLSS 超分）`
@@ -354,6 +356,8 @@ function fsrRows() {
     `<button data-fg="${n}" class="${fg === n ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   const card = esc(PC?.gpu || 'AMD/Intel 显卡');
   return [
+    row('帧生成后端', 'DLSS 与 FSR 帧生成互切：自动按显卡代际选择（新 N 卡 DLSS，老 N 卡/A 卡 FSR）。',
+      `<div class="seg" role="radiogroup" aria-label="帧生成后端">${[["auto","自动"],["dlss","DLSS"],["fsr","FSR"]].map(([k,l]) => `<button data-fgb="${k}" class="${st('fgBackend','auto') === k ? 'on' : ''}">${l}</button>`).join('')}</div>`),
     row('帧生成（AMD FSR）', `FSR 帧生成跨厂商可用：在 ${card} 上开启 2 倍插帧（不需要 NVIDIA 文件）。`, seg),
     row('NVIDIA DLSS', '未检测到 NVIDIA RTX 显卡：DLSS 超分与 DLSS 帧生成不可用；AMD/Intel 使用上面的 FSR。', '<span class="mini ghost">不可用</span>'),
   ];
@@ -701,6 +705,7 @@ document.addEventListener('click', (e) => {
     return send({ cmd: 'launch.findSaves' });
   }
   const pd = t.closest('[data-pickdir]'); if (pd) return send({ cmd: 'launch.pickFolder', key: pd.dataset.pickdir, title: pd.dataset.title || (pd.dataset.pickdir === 'neptuneDir' ? 'GTA6 CN · Victory 文件夹' : 'OptiScaler 文件夹') });
+  const fb = t.closest('[data-fgb]'); if (fb) { set({ fgBackend: fb.dataset.fgb }); return renderSettings(); }
   const fm = t.closest('[data-f1m]'); if (fm) { set({ f1Mode: fm.dataset.f1m }); return renderSettings(); }
   const fgb = t.closest('[data-fg]'); if (fgb) { set({ framegen: +fgb.dataset.fg }); SL = null; return renderSettings(); }
   const pf = t.closest('[data-pickfile]'); if (pf) return send({ cmd: 'launch.pickFile', key: pf.dataset.pickfile });

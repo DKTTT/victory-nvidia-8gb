@@ -710,6 +710,10 @@ sealed class Launch
         }
         if (dlssOn && !nvidia) { dlssOn = false; notes.Add("未检测到 NVIDIA 显卡：DLSS 已关闭（AMD/Intel 用 FSR）"); }
         if (dlssOn) { args.AddRange(["--dlss", S("dlssMode", "quality")]); env["VICTORY_DLSS"] = "1"; }
+        // (Victory) the frame-generation backend is the player's choice: DLSS <-> FSR, like a slider in the page
+        var fgBackend = S("fgBackend", "auto");
+        if (fgFrames > 0 && fgBackend == "fsr") nvidia = false;   // force the cross-vendor FSR path
+        if (fgFrames > 0 && fgBackend == "dlss" && !nvidia) { fgFrames = 0; notes.Add("已选 DLSS 帧生成但不是 NVIDIA 显卡：已关闭（可切 FSR 或自动）"); }
         if (fgFrames > 0 && nvidia && Rtx() is >= 20 and < 40)
         {
             if (Sm86Dir() == null)
