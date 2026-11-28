@@ -533,6 +533,13 @@ const SECTIONS = {
       `<div class="seg" role="radiogroup" aria-label="预热线程数">${[['half', S.warmJobsDefault], ['all', S.cores]].map(([k, n]) => `<button data-jobs="${n}" class="${(st('warmJobs', 0) || S.warmJobsDefault) == n ? 'on' : ''}">${k === 'half' ? '一半' : '全部'} (${n})</button>`).join('')}</div>`),
     row('立即预热', '第一次预热约 10 分钟；之后第一局不会卡顿或黑块', `<button class="mini" data-act="warm" ${S.running || job ? 'disabled' : ''}>${job ? '预热中…' : '开始预热'}</button>`),
     // (Victory) the shader cache can be GBs: keep it off the C drive by default, and let the player move it
+    // (Victory) auto tune from the machine, plus the two system buttons people need for "no picture / crash"
+    row('按本机配置优化', '根据显卡/显存/物理内存自动选择：节省显存、DLSS 或 FSR 帧生成、预热线程等。会覆盖你手动改过的这些项。',
+      '<button class="mini" data-act="autoTune">重新优化</button>'),
+    row('显卡超时 (TDR)', '有些显卡在编译着色器时会"掉驱动/黑屏"。把 Windows 的 TDR 超时调大（默认约 2 秒）。需要管理员权限，重启后生效。',
+      '<div class="acts"><button class="mini" data-act="tdr60">设为 60 秒</button><button class="mini" data-act="tdrOff">恢复默认</button></div>'),
+    row('虚拟内存', '按物理内存设置页面文件（约 1 倍初始 / 2 倍最大），给大场景留余量。需要管理员权限，重启后生效。',
+      '<button class="mini" data-act="pagefile">按内存设置</button>'),
     // (Victory) F1 vs launcher: one owner for the render switches, never two fighting silently
     row('F1 菜单设置', '游戏内 F1 菜单和启动器都能改渲染设置。跟随启动器（推荐）：以启动器为准，F1 里的重复项会被接管；跟随 F1：启动器不下发渲染开关，以 F1 保存的为准。帧生成/DLSS 两项始终校验，避免黑屏。',
       `<div class="seg" role="radiogroup" aria-label="F1 菜单设置"><button data-f1m="launcher" class="${st('f1Mode', 'launcher') === 'launcher' ? 'on' : ''}">跟随启动器</button><button data-f1m="f1" class="${st('f1Mode', 'launcher') === 'f1' ? 'on' : ''}">跟随 F1</button></div>`),
@@ -709,6 +716,10 @@ document.addEventListener('click', (e) => {
     case 'warm': return send({ cmd: 'launch.warm', id: ID });
     case 'getSl': SL = { state: 'progress', text: '启动中…' }; renderSettings(); return send({ cmd: 'launch.getStreamline' });
     case 'logs': return send({ cmd: 'launch.openLogs' });
+    case 'autoTune': return send({ cmd: 'launch.autoTune' });
+    case 'tdr60': return send({ cmd: 'launch.setTdr', value: '60' });
+    case 'tdrOff': return send({ cmd: 'launch.setTdr', value: 'off' });
+    case 'pagefile': return send({ cmd: 'launch.setPagefile' });
     case 'pickCache': return send({ cmd: 'launch.pickCache' });
     case 'openCache': return send({ cmd: 'launch.openCache' });
     case 'clearCache': return send({ cmd: 'launch.clearCache' });

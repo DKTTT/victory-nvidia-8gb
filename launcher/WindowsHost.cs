@@ -175,6 +175,19 @@ sealed class WindowsHost : Form, IDesktopHost
         return dialog.ShowDialog(this) == DialogResult.OK ? dialog.SelectedPath : null;
     }
 
+    // (Victory) elevated system tweaks (TDR / pagefile): UAC prompt, no output capture
+    public void RunAs(string exe, string args)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = exe, Arguments = args, UseShellExecute = true, Verb = "runas" });
+        }
+        catch (Exception e)
+        {
+            MessageBox.Show(this, "没有获得管理员权限：" + e.Message, "GTA6 CN · Victory", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     public bool Confirm(string title, string text) =>
         MessageBox.Show(this, text, title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
 

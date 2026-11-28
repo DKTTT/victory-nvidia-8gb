@@ -243,6 +243,65 @@ sealed class Launch
         return dlss;
     }
 
+    // (Victory) one-click tune from the machine: vendor/VRAM/RAM decide safe defaults; player choices only change on a press.
+    void AutoTune(bool force)
+    {
+        const long GB = 1024L * 1024 * 1024;
+        string gpu = "", driver = ""; long vram = 0, ram = 0, ramFree = 0;
+        try { Gpu(ref gpu, ref driver, ref vram); } catch { }
+        try { Memory(ref ram, ref ramFree); } catch { }
+        var gen = Streamline.RtxGeneration(gpu);
+        var nv = gen >= 20;
+        var notes = new List<string>();
+        void Def(string key, JsonNode value, string what)
+        {
+            if (!force && settings[key] != null) return;
+            settings[key] = value; if (what.Length > 0) notes.Add(what);
+        }
+        Def("vramSaver", JsonValue.Create(vram > 0 && vram < 12 * GB), vram > 0 && vram < 12 * GB ? "节省显存 开" : "");
+        Def("dlss", JsonValue.Create(nv), nv ? "DLSS 超分 开" : "");
+        var frames = nv ? (gen >= 40 ? 1 : 0) : (vram >= 8 * GB ? 1 : 0);
+        Def("framegen", JsonValue.Create(frames), frames > 0 ? (nv ? "帧生成 2x" : "FSR 帧生成 2x") : "");
+        Def("seriesX", JsonValue.Create(false), "");
+        Def("thin", JsonValue.Create(true), "额外绘制线程 开");
+        Def("keyboard", JsonValue.Create(true), "");
+        Def("warmJobs", JsonValue.Create(ram > 0 && ram < 24 * GB ? Math.Max(2, Environment.ProcessorCount / 2) : 0), "");
+        settings["autoTune"] = "1"; Save(); SendSettings();
+        app.Out(notes.Count > 0 ? "\n已按本机配置自动优化：" + string.Join("、", notes) + "\n" : "\n已按本机配置检查：当前设置无需调整\n", "ok");
+    }
+
+    // (Victory) TDR: a GPU that does not answer within 2 s is reset by Windows (black screen). A longer limit helps
+    // cards/CPUs that compile shaders for long; registry + admin + reboot.
+    void SetTdr(string value)
+    {
+        var key = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers";
+        var cmd = value == "off"
+            ? "/c reg delete \"" + key + "\" /v TdrDelay /f & reg delete \"" + key + "\" /v TdrDdiDelay /f"
+            : "/c reg add \"" + key + "\" /v TdrDelay /t REG_DWORD /d " + value + " /f & reg add \"" + key + "\" /v TdrDdiDelay /t REG_DWORD /d " + value + " /f";
+        app.Host.RunAs("cmd.exe", cmd);
+        app.Out(value == "off" ? "\n已请求管理员权限恢复 TDR 默认值；重启后生效。\n"
+                               : "\n已请求管理员权限把 TDR 超时设为 " + value + " 秒；重启后生效。\n", "h");
+    }
+
+    // (Victory) pagefile about 1x RAM initial, 2x max (for the game's big working set); admin + reboot.
+    void SetPagefile()
+    {
+        const long GB = 1024L * 1024 * 1024;
+        long ram = 0, ramFree = 0;
+        try { Memory(ref ram, ref ramFree); } catch { }
+        var gb = ram > 0 ? ram / GB : 16;
+        var initial = Math.Clamp(gb * 1024, 4096, 65536);
+        var max = Math.Clamp(initial * 2, 8192, 131072);
+        var script =
+            "$cs=Get-CimInstance Win32_ComputerSystem; Set-CimInstance -InputObject $cs -Property @{AutomaticManagedPagefile=$false} -ErrorAction Stop; " +
+            "$pf=Get-CimInstance Win32_PageFileSetting -Filter \"Name='C:\\\\pagefile.sys'\"; " +
+            "if($pf){ Set-CimInstance -InputObject $pf -Property @{InitialSize=" + initial + ";MaximumSize=" + max + "} } " +
+            "else { New-CimInstance -ClassName Win32_PageFileSetting -Property @{Name='C:\\\\pagefile.sys';InitialSize=" + initial + ";MaximumSize=" + max + "} | Out-Null }";
+        var b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        app.Host.RunAs("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + b64);
+        app.Out($"\n已请求管理员权限设置虚拟内存：初始 {initial / 1024} GB / 最大 {max / 1024} GB（物理内存 {gb} GB），重启后生效。\n", "h");
+    }
+
     // (Victory) pack the newest runs' logs into one zip the player can send; the save dialog picks where.
     void ExportLogs(JsonObject m)
     {
@@ -341,6 +400,9 @@ sealed class Launch
                 SendSettings();
                 break;
             }
+            case "autoTune": AutoTune(true); break;
+            case "setTdr": SetTdr((string?)m["value"] ?? "60"); break;
+            case "setPagefile": SetPagefile(); break;
             case "pickCache":
                 if (app.Host.PickFolder("选择着色器缓存文件夹（换位置后需要重新预热）") is string cd && cd.Length > 0)
                 {
@@ -1366,12 +1428,18 @@ sealed class Launch
 
     // our warm prints "[progress] a/b (p%) | mm:ss | rate/s | ETA mm:ss" and "[done] n made in s s (...)",
     // the page reads "a of b, s s" and "n made in s s ("
-    static readonly Regex ProgressLine = new(@"^\[progress\] (\d+)/(\d+) \([\d.]+%\) \| (\d+):(\d+) \|");
+    // "warm" prints `[progress] 100/74712 (0.1%) | 0m05s | 20.0/s | ETA 62m12s` (mmss(), not m:ss);
+    // the old pattern wanted `5:00` and silently dropped every line, so the page stayed at 0%.
+    static readonly Regex ProgressLine = new(@"^\[progress\] (\d+)/(\d+) \([\d.]+%\) \| (\d+)m(\d+)s \|");
+    static readonly Regex LibraryLine = new(@"^\[library\] (\d+)/(\d+) \| (\d+)m(\d+)s \|");
     static string ForPage(string line)
     {
         var m = ProgressLine.Match(line);
         if (m.Success)
             return $"{m.Groups[1].Value} of {m.Groups[2].Value}, {(int.Parse(m.Groups[3].Value) * 60 + int.Parse(m.Groups[4].Value))} s";
+        var lib = LibraryLine.Match(line);
+        if (lib.Success)
+            return $"{lib.Groups[1].Value} of {lib.Groups[2].Value}, {(int.Parse(lib.Groups[3].Value) * 60 + int.Parse(lib.Groups[4].Value))} s";
         return line.StartsWith("[done] ") ? line[7..] : line;
     }
 
@@ -1472,6 +1540,8 @@ sealed class Launch
         try { if (File.Exists(S("game"))) disk = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(S("game")))!).AvailableFreeSpace; } catch { }
         app.Post(new JsonObject { ["type"] = "pc", ["gpu"] = gpu, ["driver"] = driver, ["vram"] = vram, ["ram"] = ram, ["ramFree"] = ramFree, ["disk"] = disk,
             ["cpu"] = Environment.ProcessorCount, ["rtx"] = Streamline.RtxGeneration(gpu) });
+        // (Victory) first run on this machine: pick safe defaults from its own GPU/VRAM/RAM
+        if (S("autoTune").Length == 0) AutoTune(false);
     }
 #if WINDOWS
     // the display adapters' entries in the registry: the card with the most memory

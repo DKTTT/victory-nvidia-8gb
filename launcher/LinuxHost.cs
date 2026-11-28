@@ -183,7 +183,8 @@ sealed class LinuxHost(bool test, string? saveDirectory) : IDesktopHost
         Post($"{{\"type\":\"win\",\"max\":{(max ? "true" : "false")}}}");
         return 0;
     }
-    public bool Confirm(string title, string text) => true;   // no GTK dialog wired here; the page asks first
+    public bool Confirm(string title, string text) => true;
+    public void RunAs(string exe, string args) { try { Process.Start(new ProcessStartInfo { FileName = exe, Arguments = args, UseShellExecute = true }); } catch { } }   // no GTK dialog wired here; the page asks first
 
     public string? PickFile(string title, string pattern, string patternName) => ChooseFiles(title, 0, pattern: pattern, patternName: patternName).FirstOrDefault();
 
